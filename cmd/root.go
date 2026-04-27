@@ -1,0 +1,67 @@
+package cmd
+
+import (
+	"os"
+	"strings"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"github.com/spf13/cobra"
+)
+
+var (
+	logLevel string
+	version  = "0.1.0"
+)
+
+var rootCmd = &cobra.Command{
+	Use:   "gl-runner-harvester",
+	Short: "GitLab runner reconnaissance and secret harvesting tool",
+	Long: `gl-runner-harvester detects GitLab CI runner configuration,
+monitors CI/CD jobs, harvests source code and credentials,
+and scans for secrets using pattern matching and titus.`,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		return configureLogging(logLevel)
+	},
+}
+
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print the version",
+	Run: func(cmd *cobra.Command, args []string) {
+		log.Info().Str("version", version).Msg("gl-runner-harvester")
+	},
+}
+
+func configureLogging(level string) error {
+	writer := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}
+	log.Logger = zerolog.New(writer).With().Timestamp().Logger()
+
+	switch strings.ToLower(level) {
+	case "trace":
+		zerolog.SetGlobalLevel(zerolog.TraceLevel)
+	case "debug":
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	case "info":
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	case "warn", "warning":
+		zerolog.SetGlobalLevel(zerolog.WarnLevel)
+	case "error":
+		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
+	default:
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+	return nil
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (trace, debug, info, warn, error)")
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(harvestCmd)
+}
