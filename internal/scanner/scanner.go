@@ -41,12 +41,16 @@ func Scan(envVars map[string]string, scanDir string) ([]Finding, error) {
 }
 
 // scanWithTitus attempts to run the titus binary and parse its output.
+// dir is an output directory created by this tool (not raw user input), so it
+// is safe to pass as an argument to the titus subprocess.
 func scanWithTitus(dir string) ([]Finding, error) {
 	titusPath, err := exec.LookPath("titus")
 	if err != nil {
 		return nil, fmt.Errorf("titus not found in PATH: %w", err)
 	}
 
+	// dir originates from the --output-dir flag value resolved via os.MkdirAll;
+	// it is not shell-expanded, so passing it as a discrete argument is safe.
 	cmd := exec.Command(titusPath, "scan", dir) // #nosec G204
 	var out bytes.Buffer
 	cmd.Stdout = &out

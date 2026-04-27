@@ -3,9 +3,11 @@ package monitor
 import (
 	"context"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
@@ -33,10 +35,11 @@ func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs in
 	}
 }
 
-// Start begins the monitoring loop and blocks until context is cancelled or an
-// unrecoverable error occurs.
+// Start begins the monitoring loop and blocks until the process receives
+// SIGINT/SIGTERM or an unrecoverable error occurs.
 func (m *Monitor) Start() error {
-	ctx := context.Background()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	// If we are already inside a CI job (env vars present), harvest immediately.
 	if jobID := os.Getenv("CI_JOB_ID"); jobID != "" {
