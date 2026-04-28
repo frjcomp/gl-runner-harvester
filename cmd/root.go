@@ -11,7 +11,7 @@ import (
 
 var (
 	logLevel string
-	version  = "0.1.0"
+	version  = "dev"
 
 	getArgs      = func() []string { return os.Args[1:] }
 	executeRoot  = func() error { return rootCmd.Execute() }
@@ -22,7 +22,7 @@ var rootCmd = &cobra.Command{
 	Use:   "gl-runner-harvester",
 	Short: "GitLab runner reconnaissance and secret harvesting tool",
 	Long: `gl-runner-harvester detects GitLab CI runner configuration,
-monitors CI/CD jobs, harvests source code and credentials,
+monitors CI/CD jobs, harvests source code when enabled,
 and scans for secrets using pattern matching and titus.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return configureLogging(logLevel)
