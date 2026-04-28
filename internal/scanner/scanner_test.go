@@ -64,8 +64,23 @@ func TestApplyVerificationErrorIsIgnored(t *testing.T) {
 	f := &Finding{Match: "x"}
 	m := &types.Match{RuleID: "rule"}
 	applyVerification(f, m, fakeValidationEngine{canValidate: true, err: errors.New("boom")})
-	if f.VerificationStatus != "" || f.VerificationMsg != "" {
-		t.Fatalf("expected finding unchanged on error")
+	if f.VerificationStatus != "undetermined" {
+		t.Fatalf("expected undetermined status on error, got %q", f.VerificationStatus)
+	}
+	if f.VerificationMsg != "boom" {
+		t.Fatalf("expected error message to be propagated")
+	}
+}
+
+func TestApplyVerificationNilResult(t *testing.T) {
+	f := &Finding{Match: "x"}
+	m := &types.Match{RuleID: "rule"}
+	applyVerification(f, m, fakeValidationEngine{canValidate: true, result: nil})
+	if f.VerificationStatus != "undetermined" {
+		t.Fatalf("expected undetermined status on nil result, got %q", f.VerificationStatus)
+	}
+	if f.VerificationMsg != "validator returned no result" {
+		t.Fatalf("expected nil result message, got %q", f.VerificationMsg)
 	}
 }
 

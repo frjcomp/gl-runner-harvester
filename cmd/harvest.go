@@ -13,28 +13,32 @@ import (
 )
 
 var (
-	outputDir    string
-	runnerConfig string
-	exectuor     string
-	interval     int
-	scanSecrets  bool
-	gitlabURL    string
+	outputDir      string
+	collectionPath string
+	runnerConfig   string
+	exectuor       string
+	interval       int
+	scanSecrets    bool
+	gitlabURL      string
+	noHarvestFiles bool
 )
 
 var harvestCmd = &cobra.Command{
 	Use:   "harvest",
 	Short: "Start harvesting CI/CD jobs from GitLab runners",
 	Long: `harvest detects the runner environment, monitors for active CI/CD jobs,
-copies source code and credentials, and optionally scans for secrets.`,
+copies source code when enabled, and optionally scans for secrets.`,
 	RunE: runHarvest,
 }
 
 func init() {
-	harvestCmd.Flags().StringVar(&outputDir, "output-dir", "/tmp/gl-harvest", "Directory to store harvested data")
+	harvestCmd.Flags().StringVar(&collectionPath, "collection-path", "/tmp/gl-harvest", "Directory to store harvested data")
+	harvestCmd.Flags().StringVar(&outputDir, "output-dir", "", "Deprecated alias for --collection-path")
 	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
 	harvestCmd.Flags().StringVar(&exectuor, "exectuor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
 	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
+	harvestCmd.Flags().BoolVar(&noHarvestFiles, "no-harvest-files", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
 	harvestCmd.Flags().StringVar(&gitlabURL, "gitlab-url", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
 }
 
@@ -82,12 +86,17 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	collectPath := strings.TrimSpace(collectionPath)
+	if legacy := strings.TrimSpace(outputDir); legacy != "" {
+		collectPath = legacy
+	}
+
 	// 5. Create harvester
-	h := harvester.New(outputDir, scanSecrets, normalizedGitLabURL)
+	h := harvester.New(collectPath, scanSecrets, normalizedGitLabURL, !noHarvestFiles)
 
 	// 6. Start monitoring loop
 	m := monitor.New(osInfo, execType, interval, h)
-	log.Info().Int("interval_seconds", interval).Str("output_dir", outputDir).Msg("Starting monitor")
+	log.Info().Int("interval_seconds", interval).Str("collection_path", collectPath).Bool("harvest_files", !noHarvestFiles).Msg("Starting monitor")
 	return m.Start()
 }
 

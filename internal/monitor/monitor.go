@@ -1,11 +1,13 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,23 +23,41 @@ type Monitor struct {
 	interval time.Duration
 	h        jobHarvester
 	seen     map[string]struct{}
+	listProc processJobLister
 }
 
 type jobHarvester interface {
-	HarvestCurrentEnv(jobID string) error
 	HarvestJob(jobDir string) error
+	HarvestProcess(jobID string, env map[string]string, cmdline string) error
 }
+
+type processJob struct {
+	PID     int
+	JobID   string
+	Cmdline string
+	Env     map[string]string
+}
+
+type processJobLister func() ([]processJob, error)
 
 var notifyContext = signal.NotifyContext
 
 // New creates a new Monitor instance.
 func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h jobHarvester) *Monitor {
+	var lister processJobLister
+	if osInfo.OS == "linux" && (execType == detector.Shell || execType == detector.SSH) {
+		lister = listLinuxProcessJobs
+	} else if osInfo.OS == "windows" && (execType == detector.Shell || execType == detector.SSH) {
+		lister = listWindowsProcessJobs
+	}
+
 	return &Monitor{
 		osInfo:   osInfo,
 		execType: execType,
 		interval: time.Duration(intervalSecs) * time.Second,
 		h:        h,
 		seen:     make(map[string]struct{}),
+		listProc: lister,
 	}
 }
 
@@ -47,20 +67,16 @@ func (m *Monitor) Start() error {
 	ctx, cancel := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// If we are already inside a CI job (env vars present), harvest immediately.
-	if jobID := os.Getenv("CI_JOB_ID"); jobID != "" {
-		log.Info().Str("job_id", jobID).Msg("Already inside a CI job; harvesting current environment")
-		if err := m.h.HarvestCurrentEnv(jobID); err != nil {
-			log.Error().Err(err).Msg("Failed to harvest current environment")
-		}
-	}
-
 	watchDirs := m.buildDirs()
-	if len(watchDirs) == 0 {
-		log.Warn().Msg("No build directories to watch; will only check for env-var based jobs")
+	if len(watchDirs) == 0 && m.listProc == nil {
+		log.Warn().Msg("No monitor sources available for detected executor/OS")
 	}
 
-	log.Info().Strs("watch_dirs", watchDirs).Msg("Starting polling loop")
+	if m.listProc != nil {
+		log.Info().Str("mode", "shell-proc").Str("os", m.osInfo.OS).Msg("Starting polling loop")
+	} else {
+		log.Info().Strs("watch_dirs", watchDirs).Msg("Starting polling loop")
+	}
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
@@ -73,7 +89,30 @@ func (m *Monitor) startLoop(ctx context.Context, tick <-chan time.Time, watchDir
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-tick:
-			m.poll(watchDirs)
+			if m.listProc != nil {
+				m.pollProcesses()
+			} else {
+				m.poll(watchDirs)
+			}
+		}
+	}
+}
+
+func (m *Monitor) pollProcesses() {
+	jobs, err := m.listProc()
+	if err != nil {
+		log.Debug().Err(err).Str("os", m.osInfo.OS).Msg("Cannot list process jobs")
+		return
+	}
+
+	for _, job := range jobs {
+		if _, already := m.seen[job.JobID]; already {
+			continue
+		}
+		m.seen[job.JobID] = struct{}{}
+		log.Info().Str("job_id", job.JobID).Int("pid", job.PID).Str("cmdline", job.Cmdline).Msg("New job process detected")
+		if err := m.h.HarvestProcess(job.JobID, job.Env, job.Cmdline); err != nil {
+			log.Error().Err(err).Str("job_id", job.JobID).Int("pid", job.PID).Msg("Harvest failed")
 		}
 	}
 }
@@ -175,4 +214,95 @@ func contains(s []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func listLinuxProcessJobs() ([]processJob, error) {
+	procEntries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+
+	jobs := make([]processJob, 0)
+	for _, entry := range procEntries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+
+		env, err := readProcEnviron(pid)
+		if err != nil {
+			continue
+		}
+
+		jobID := strings.TrimSpace(env["CI_JOB_ID"])
+		if jobID == "" {
+			continue
+		}
+
+		cmdline, err := readProcCmdline(pid)
+		if err != nil {
+			cmdline = ""
+		}
+
+		jobs = append(jobs, processJob{
+			PID:     pid,
+			JobID:   jobID,
+			Cmdline: cmdline,
+			Env:     env,
+		})
+	}
+
+	return jobs, nil
+}
+
+func readProcEnviron(pid int) (map[string]string, error) {
+	path := filepath.Join("/proc", strconv.Itoa(pid), "environ")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	env := make(map[string]string)
+	parts := bytes.Split(data, []byte{0})
+	for _, raw := range parts {
+		if len(raw) == 0 {
+			continue
+		}
+		kv := string(raw)
+		key, value, found := strings.Cut(kv, "=")
+		if !found || key == "" {
+			continue
+		}
+		env[key] = value
+	}
+	return env, nil
+}
+
+func readProcCmdline(pid int) (string, error) {
+	path := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if len(data) == 0 {
+		return "", nil
+	}
+
+	parts := bytes.Split(data, []byte{0})
+	args := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if len(p) == 0 {
+			continue
+		}
+		args = append(args, string(p))
+	}
+	if len(args) == 0 {
+		return "", nil
+	}
+
+	return strings.Join(args, " "), nil
 }

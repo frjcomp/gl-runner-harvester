@@ -14,15 +14,16 @@ import (
 type fakeHarvester struct {
 	current []string
 	jobs    []string
-}
-
-func (f *fakeHarvester) HarvestCurrentEnv(jobID string) error {
-	f.current = append(f.current, jobID)
-	return nil
+	procs   []string
 }
 
 func (f *fakeHarvester) HarvestJob(jobDir string) error {
 	f.jobs = append(f.jobs, jobDir)
+	return nil
+}
+
+func (f *fakeHarvester) HarvestProcess(jobID string, _ map[string]string, _ string) error {
+	f.procs = append(f.procs, jobID)
 	return nil
 }
 
@@ -136,5 +137,82 @@ func TestStartWithInjectedCanceledContext(t *testing.T) {
 	err := m.Start()
 	if err == nil {
 		t.Fatalf("expected cancellation error")
+	}
+}
+
+func TestPollProcessesHarvestsNewJobIDs(t *testing.T) {
+	h := &fakeHarvester{}
+	m := &Monitor{
+		h:    h,
+		seen: map[string]struct{}{},
+		listProc: func() ([]processJob, error) {
+			return []processJob{
+				{PID: 11, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}},
+				{PID: 12, JobID: "102", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "102"}},
+			}, nil
+		},
+	}
+
+	m.pollProcesses()
+	if len(h.procs) != 2 {
+		t.Fatalf("expected two harvested process jobs, got %d", len(h.procs))
+	}
+
+	// Duplicate job IDs should not be harvested again.
+	m.listProc = func() ([]processJob, error) {
+		return []processJob{{PID: 99, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}}}, nil
+	}
+	m.pollProcesses()
+	if len(h.procs) != 2 {
+		t.Fatalf("expected deduped process jobs, got %d", len(h.procs))
+	}
+}
+
+func TestNewUsesProcessListerForLinuxShell(t *testing.T) {
+	h := &fakeHarvester{}
+	m := New(detector.OSInfo{OS: "linux"}, detector.Shell, 1, h)
+	if m.listProc == nil {
+		t.Fatalf("expected process lister for linux shell")
+	}
+
+	m = New(detector.OSInfo{OS: "linux"}, detector.Docker, 1, h)
+	if m.listProc != nil {
+		t.Fatalf("did not expect process lister for linux docker")
+	}
+}
+
+func TestNewUsesProcessListerForWindowsShell(t *testing.T) {
+	h := &fakeHarvester{}
+	m := New(detector.OSInfo{OS: "windows"}, detector.Shell, 1, h)
+	if m.listProc == nil {
+		t.Fatalf("expected process lister for windows shell")
+	}
+
+	m = New(detector.OSInfo{OS: "windows"}, detector.Docker, 1, h)
+	if m.listProc != nil {
+		t.Fatalf("did not expect process lister for windows docker")
+	}
+}
+
+func TestIsGitLabRunnerUser(t *testing.T) {
+	if !isGitLabRunnerUser("HOST\\gitlab-runner") {
+		t.Fatalf("expected domain-qualified gitlab-runner to match")
+	}
+	if !isGitLabRunnerUser("gitlab-runner") {
+		t.Fatalf("expected plain gitlab-runner to match")
+	}
+	if isGitLabRunnerUser("HOST\\someone") {
+		t.Fatalf("did not expect non-runner account to match")
+	}
+}
+
+func TestCILookupCaseInsensitive(t *testing.T) {
+	env := map[string]string{"ci_job_id": "777"}
+	if got := ciLookup(env, "CI_JOB_ID"); got != "777" {
+		t.Fatalf("expected case-insensitive match, got %q", got)
+	}
+
+	if got := ciLookup(map[string]string{"OTHER": "x"}, "CI_JOB_ID"); got != "" {
+		t.Fatalf("expected empty when key is missing, got %q", got)
 	}
 }

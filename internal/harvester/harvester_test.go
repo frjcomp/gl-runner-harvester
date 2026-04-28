@@ -4,17 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 func TestDeriveJobID(t *testing.T) {
-	t.Setenv("CI_JOB_ID", "123")
-	if got := deriveJobID("/tmp/job"); got != "123" {
-		t.Fatalf("expected CI_JOB_ID, got %q", got)
-	}
-
-	t.Setenv("CI_JOB_ID", "")
 	if got := deriveJobID("/tmp/job"); got != "job" {
 		t.Fatalf("expected basename fallback, got %q", got)
 	}
@@ -100,36 +93,6 @@ func TestWriteSummary(t *testing.T) {
 	}
 }
 
-func TestHarvestCredentialFiles(t *testing.T) {
-	home := t.TempDir()
-	cwd := t.TempDir()
-	dest := t.TempDir()
-
-	t.Setenv("HOME", home)
-
-	if err := os.WriteFile(filepath.Join(home, ".netrc"), []byte("machine"), 0o600); err != nil {
-		t.Fatalf("write .netrc: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(cwd, ".env"), []byte("A=B"), 0o600); err != nil {
-		t.Fatalf("write .env: %v", err)
-	}
-
-	oldWd, _ := os.Getwd()
-	if err := os.Chdir(cwd); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(oldWd) }()
-
-	found := harvestCredentialFiles(dest)
-	joined := strings.Join(found, ",")
-	if !strings.Contains(joined, ".netrc") {
-		t.Fatalf("expected .netrc in found set: %v", found)
-	}
-	if !strings.Contains(joined, ".env") {
-		t.Fatalf("expected .env in found set: %v", found)
-	}
-}
-
 func TestHarvestMethodsNoScan(t *testing.T) {
 	out := t.TempDir()
 	src := t.TempDir()
@@ -137,13 +100,80 @@ func TestHarvestMethodsNoScan(t *testing.T) {
 		t.Fatalf("write source file: %v", err)
 	}
 
-	h := New(out, false, "")
+	h := New(out, false, "", true)
 	if err := h.HarvestJob(src); err != nil {
 		t.Fatalf("HarvestJob: %v", err)
 	}
+}
 
-	t.Setenv("CI_PROJECT_DIR", src)
-	if err := h.HarvestCurrentEnv("job-1"); err != nil {
-		t.Fatalf("HarvestCurrentEnv: %v", err)
+func TestHarvestProcessWritesEnvSnapshots(t *testing.T) {
+	out := t.TempDir()
+	h := New(out, false, "", true)
+
+	env := map[string]string{
+		"CI_JOB_ID":      "222",
+		"CI_PROJECT_DIR": t.TempDir(),
+		"OTHER_KEY":      "value",
+	}
+
+	if err := h.HarvestProcess("222", env, "powershell -File job.ps1"); err != nil {
+		t.Fatalf("HarvestProcess: %v", err)
+	}
+
+	dirs, err := filepath.Glob(filepath.Join(out, "222_*"))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("expected one output dir, got %v (err=%v)", dirs, err)
+	}
+
+	envRaw, err := os.ReadFile(filepath.Join(dirs[0], "env_vars.json"))
+	if err != nil {
+		t.Fatalf("read env_vars.json: %v", err)
+	}
+	var envOut map[string]string
+	if err := json.Unmarshal(envRaw, &envOut); err != nil {
+		t.Fatalf("unmarshal env vars: %v", err)
+	}
+	if envOut["OTHER_KEY"] != "value" {
+		t.Fatalf("expected full env map to be persisted")
+	}
+
+	ciRaw, err := os.ReadFile(filepath.Join(dirs[0], "ci_vars.json"))
+	if err != nil {
+		t.Fatalf("read ci_vars.json: %v", err)
+	}
+	var ciOut map[string]string
+	if err := json.Unmarshal(ciRaw, &ciOut); err != nil {
+		t.Fatalf("unmarshal ci vars: %v", err)
+	}
+	if ciOut["CI_JOB_ID"] != "222" {
+		t.Fatalf("expected CI vars to be persisted")
+	}
+	if _, ok := ciOut["OTHER_KEY"]; ok {
+		t.Fatalf("did not expect non-CI key in ci vars snapshot")
+	}
+}
+
+func TestHarvestProcessNoHarvestFilesWritesNoArtifacts(t *testing.T) {
+	out := t.TempDir()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	h := New(out, true, "https://gitlab.com", false)
+	env := map[string]string{
+		"CI_JOB_ID":      "333",
+		"CI_PROJECT_DIR": src,
+	}
+	if err := h.HarvestProcess("333", env, "bash -lc run"); err != nil {
+		t.Fatalf("HarvestProcess: %v", err)
+	}
+
+	dirs, err := filepath.Glob(filepath.Join(out, "333_*"))
+	if err != nil {
+		t.Fatalf("glob output: %v", err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("expected no harvested artifacts in scan-only mode, got %v", dirs)
 	}
 }

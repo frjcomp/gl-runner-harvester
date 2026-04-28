@@ -121,6 +121,12 @@ func scanSource(content, source string, locationFn func(line int) string, valida
 		if match.ValidationResult != nil {
 			finding.VerificationStatus = string(match.ValidationResult.Status)
 			finding.VerificationMsg = match.ValidationResult.Message
+			if finding.VerificationStatus == "" {
+				applyVerification(&finding, match, validationEngine)
+			}
+			if finding.VerificationStatus == "" && finding.VerificationMsg != "" {
+				finding.VerificationStatus = string(types.StatusUndetermined)
+			}
 		} else {
 			applyVerification(&finding, match, validationEngine)
 		}
@@ -151,9 +157,13 @@ func applyVerification(finding *Finding, match *types.Match, validationEngine va
 	result, err := validationEngine.ValidateMatch(context.Background(), match)
 	if err != nil {
 		log.Debug().Err(err).Str("rule_id", match.RuleID).Msg("token validation failed")
+		finding.VerificationStatus = string(types.StatusUndetermined)
+		finding.VerificationMsg = err.Error()
 		return
 	}
 	if result == nil {
+		finding.VerificationStatus = string(types.StatusUndetermined)
+		finding.VerificationMsg = "validator returned no result"
 		return
 	}
 

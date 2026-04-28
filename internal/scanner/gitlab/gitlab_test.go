@@ -27,6 +27,15 @@ func TestCanValidate(t *testing.T) {
 	if !CanValidate(customPATRuleID) || !CanValidate(customCBTRuleID) || !CanValidate(customRTRuleID) {
 		t.Fatalf("expected known rule IDs to be validatable")
 	}
+	if !CanValidate("gitlab.personal_access_token") {
+		t.Fatalf("expected PAT alias to be validatable")
+	}
+	if !CanValidate("foo.gitlab.job-token") {
+		t.Fatalf("expected CBT alias to be validatable")
+	}
+	if !CanValidate("gitlab.runner_token") {
+		t.Fatalf("expected RT alias to be validatable")
+	}
 	if CanValidate("other") {
 		t.Fatalf("expected unknown rule ID to be false")
 	}

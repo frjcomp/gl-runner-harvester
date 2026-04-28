@@ -75,12 +75,8 @@ func Rules() []*types.Rule {
 
 // CanValidate returns true when this package can verify the specified rule.
 func CanValidate(ruleID string) bool {
-	switch ruleID {
-	case customPATRuleID, customCBTRuleID, customRTRuleID:
-		return true
-	default:
-		return false
-	}
+	_, ok := tokenSpecForRuleID(ruleID)
+	return ok
 }
 
 // NewValidator returns a native Titus validator for GitLab token families.
@@ -209,8 +205,10 @@ func apiEndpoint(baseURL, apiPath string) (string, error) {
 }
 
 func tokenSpecForRuleID(ruleID string) (tokenSpec, bool) {
-	switch ruleID {
-	case customPATRuleID:
+	normalized := strings.ToLower(strings.TrimSpace(ruleID))
+
+	switch {
+	case normalized == customPATRuleID || (strings.Contains(normalized, "gitlab") && strings.Contains(normalized, "pat")) || strings.Contains(normalized, "personal_access_token") || strings.Contains(normalized, "personal-access-token"):
 		return tokenSpec{
 			prefix:     "glpat-",
 			tokenType:  "PAT",
@@ -218,7 +216,7 @@ func tokenSpecForRuleID(ruleID string) (tokenSpec, bool) {
 			apiPath:    gitLabUserAPIPath,
 			headerName: "PRIVATE-TOKEN",
 		}, true
-	case customCBTRuleID:
+	case normalized == customCBTRuleID || (strings.Contains(normalized, "gitlab") && (strings.Contains(normalized, "cbt") || strings.Contains(normalized, "job_token") || strings.Contains(normalized, "job-token"))):
 		return tokenSpec{
 			prefix:     "glcbt-",
 			tokenType:  "CBT",
@@ -226,7 +224,7 @@ func tokenSpecForRuleID(ruleID string) (tokenSpec, bool) {
 			apiPath:    gitLabJobAPIPath,
 			headerName: "JOB-TOKEN",
 		}, true
-	case customRTRuleID:
+	case normalized == customRTRuleID || (strings.Contains(normalized, "gitlab") && (strings.Contains(normalized, "rt") || strings.Contains(normalized, "runner_token") || strings.Contains(normalized, "runner-token") || strings.Contains(normalized, "runner_registration"))):
 		return tokenSpec{
 			prefix:    "glrt-",
 			tokenType: "RT",
