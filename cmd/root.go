@@ -12,6 +12,10 @@ import (
 var (
 	logLevel string
 	version  = "0.1.0"
+
+	getArgs      = func() []string { return os.Args[1:] }
+	executeRoot  = func() error { return rootCmd.Execute() }
+	exitWithCode = os.Exit
 )
 
 var rootCmd = &cobra.Command{
@@ -55,13 +59,13 @@ func configureLogging(level string) error {
 }
 
 func Execute() {
-	args := os.Args[1:]
+	args := getArgs()
 	if shouldDefaultToHarvest(args) {
 		rootCmd.SetArgs(append([]string{"harvest"}, args...))
 	}
 
-	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+	if err := executeRoot(); err != nil {
+		exitWithCode(1)
 	}
 }
 

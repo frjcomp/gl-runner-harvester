@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
-	"github.com/frjcomp/gl-runner-harvester/internal/harvester"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,12 +19,19 @@ type Monitor struct {
 	osInfo   detector.OSInfo
 	execType detector.ExecutorType
 	interval time.Duration
-	h        *harvester.Harvester
+	h        jobHarvester
 	seen     map[string]struct{}
 }
 
+type jobHarvester interface {
+	HarvestCurrentEnv(jobID string) error
+	HarvestJob(jobDir string) error
+}
+
+var notifyContext = signal.NotifyContext
+
 // New creates a new Monitor instance.
-func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h *harvester.Harvester) *Monitor {
+func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h jobHarvester) *Monitor {
 	return &Monitor{
 		osInfo:   osInfo,
 		execType: execType,
@@ -38,7 +44,7 @@ func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs in
 // Start begins the monitoring loop and blocks until the process receives
 // SIGINT/SIGTERM or an unrecoverable error occurs.
 func (m *Monitor) Start() error {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, cancel := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// If we are already inside a CI job (env vars present), harvest immediately.
@@ -58,11 +64,15 @@ func (m *Monitor) Start() error {
 	ticker := time.NewTicker(m.interval)
 	defer ticker.Stop()
 
+	return m.startLoop(ctx, ticker.C, watchDirs)
+}
+
+func (m *Monitor) startLoop(ctx context.Context, tick <-chan time.Time, watchDirs []string) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-tick:
 			m.poll(watchDirs)
 		}
 	}

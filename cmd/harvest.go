@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
@@ -17,6 +18,7 @@ var (
 	exectuor     string
 	interval     int
 	scanSecrets  bool
+	gitlabURL    string
 )
 
 var harvestCmd = &cobra.Command{
@@ -33,6 +35,7 @@ func init() {
 	harvestCmd.Flags().StringVar(&exectuor, "exectuor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
 	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
+	harvestCmd.Flags().StringVar(&gitlabURL, "gitlab-url", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
 }
 
 func runHarvest(cmd *cobra.Command, args []string) error {
@@ -74,13 +77,39 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 	// 4. Print detection summary
 	printDetectionSummary(osInfo, execType, permInfo)
 
+	normalizedGitLabURL, err := normalizeGitLabURL(gitlabURL)
+	if err != nil {
+		return err
+	}
+
 	// 5. Create harvester
-	h := harvester.New(outputDir, scanSecrets)
+	h := harvester.New(outputDir, scanSecrets, normalizedGitLabURL)
 
 	// 6. Start monitoring loop
 	m := monitor.New(osInfo, execType, interval, h)
 	log.Info().Int("interval_seconds", interval).Str("output_dir", outputDir).Msg("Starting monitor")
 	return m.Start()
+}
+
+func normalizeGitLabURL(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", fmt.Errorf("--gitlab-url cannot be empty")
+	}
+	if !strings.Contains(v, "://") {
+		v = "https://" + v
+	}
+
+	u, err := url.Parse(v)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid --gitlab-url value %q", raw)
+	}
+
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func printDetectionSummary(osInfo detector.OSInfo, execType detector.ExecutorType, permInfo detector.PermissionInfo) {

@@ -17,11 +17,12 @@ import (
 type Harvester struct {
 	outputDir   string
 	scanSecrets bool
+	gitlabURL   string
 }
 
 // New creates a new Harvester.
-func New(outputDir string, scanSecrets bool) *Harvester {
-	return &Harvester{outputDir: outputDir, scanSecrets: scanSecrets}
+func New(outputDir string, scanSecrets bool, gitlabURL string) *Harvester {
+	return &Harvester{outputDir: outputDir, scanSecrets: scanSecrets, gitlabURL: gitlabURL}
 }
 
 // JobData holds all harvested information for a single CI job.
@@ -79,7 +80,7 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 
 	// Secret scanning.
 	if h.scanSecrets {
-		findings, err := scanner.Scan(data.EnvVars, destRoot)
+		findings, err := scanner.Scan(data.EnvVars, destRoot, h.gitlabURL)
 		if err != nil {
 			log.Warn().Err(err).Msg("Secret scan failed")
 		} else {
