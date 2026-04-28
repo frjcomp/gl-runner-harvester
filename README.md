@@ -15,6 +15,8 @@ Install the latest Linux/macOS release with:
 curl -fsSL https://frjcomp.github.io/gl-runner-harvester/install.sh | sh
 ```
 
+The published installer script is generated in the release workflow from `.goreleaser.yaml` using `binstaller` (it is not maintained manually in this repository).
+
 Security warning: review the installation script before executing it, and do not pipe remote scripts into a privileged shell without verifying the source first.
 
 You can also download binaries manually from [GitHub Releases](https://github.com/frjcomp/gl-runner-harvester/releases).

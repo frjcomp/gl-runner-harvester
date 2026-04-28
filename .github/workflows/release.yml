@@ -47,10 +47,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install binstaller
+        run: go install github.com/binary-install/binstaller/cmd/binst@latest
+
+      - name: Generate install script from GoReleaser config
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p .pages .config
+          binst init --source=goreleaser --file=.goreleaser.yaml --repo=frjcomp/gl-runner-harvester -o .config/binstaller.yml --force
+          binst gen --config .config/binstaller.yml -o .pages/install.sh
+          chmod +x .pages/install.sh
+
       - name: Prepare Pages files
         run: |
-          mkdir -p .pages
-          cp install.sh .pages/install.sh
           cp index.html .pages/index.html
 
       - name: Upload Pages artifact
