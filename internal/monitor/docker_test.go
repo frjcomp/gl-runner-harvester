@@ -48,3 +48,49 @@ func TestDockerSourceDirFallback(t *testing.T) {
 		t.Fatalf("unexpected source dir fallback: %q", got)
 	}
 }
+
+func TestResolveContainerProjectDirToHost(t *testing.T) {
+	mounts := []container.MountPoint{
+		{Destination: "/builds", Source: "/host/builds"},
+		{Destination: "/cache", Source: "/host/cache"},
+	}
+
+	got := resolveContainerProjectDirToHost("/builds/group/project", mounts)
+	if got != "/host/builds/group/project" {
+		t.Fatalf("unexpected mapped path: %q", got)
+	}
+}
+
+func TestResolveContainerProjectDirToHostPrefersMostSpecificMount(t *testing.T) {
+	mounts := []container.MountPoint{
+		{Destination: "/builds", Source: "/host/builds"},
+		{Destination: "/builds/group", Source: "/host/group"},
+	}
+
+	got := resolveContainerProjectDirToHost("/builds/group/project", mounts)
+	if got != "/host/group/project" {
+		t.Fatalf("expected most specific mount match, got %q", got)
+	}
+}
+
+func TestResolveContainerProjectDirToHostNoMatch(t *testing.T) {
+	mounts := []container.MountPoint{{Destination: "/cache", Source: "/host/cache"}}
+	if got := resolveContainerProjectDirToHost("/builds/group/project", mounts); got != "" {
+		t.Fatalf("expected empty mapping when no mount matches, got %q", got)
+	}
+}
+
+func TestIsLikelyGitLabJobContainer(t *testing.T) {
+	if !isLikelyGitLabJobContainer(map[string]string{"CI_JOB_ID": "123"}) {
+		t.Fatalf("expected CI_JOB_ID container to be included")
+	}
+	if !isLikelyGitLabJobContainer(map[string]string{"CI_PROJECT_DIR": "/builds/g/p"}) {
+		t.Fatalf("expected CI_PROJECT_DIR container to be included")
+	}
+	if !isLikelyGitLabJobContainer(map[string]string{"GITLAB_CI": "true"}) {
+		t.Fatalf("expected GITLAB_CI=true container to be included")
+	}
+	if isLikelyGitLabJobContainer(map[string]string{"PATH": "/usr/bin"}) {
+		t.Fatalf("expected non-CI container to be excluded")
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -103,17 +105,21 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 			env = envListToMap(inspect.Config.Env)
 		}
 
+		if !isLikelyGitLabJobContainer(env) {
+			continue
+		}
+
 		jobID := strings.TrimSpace(ciLookup(env, "CI_JOB_ID"))
 		if jobID == "" {
 			jobID = c.ID
 		}
 
-		sourceDir := strings.TrimSpace(ciLookup(env, "CI_PROJECT_DIR"))
+		sourceDir := resolveContainerProjectDirToHost(ciLookup(env, "CI_PROJECT_DIR"), inspect.Mounts)
 		if sourceDir == "" {
 			sourceDir = dockerSourceDirFallback(inspect.Mounts)
-			if sourceDir != "" {
-				env["CI_PROJECT_DIR"] = sourceDir
-			}
+		}
+		if sourceDir != "" {
+			env["CI_PROJECT_DIR"] = sourceDir
 		}
 
 		cmdline := ""
@@ -132,6 +138,57 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 	}
 
 	return out, nil
+}
+
+func isLikelyGitLabJobContainer(env map[string]string) bool {
+	if strings.TrimSpace(ciLookup(env, "CI_JOB_ID")) != "" {
+		return true
+	}
+	if strings.TrimSpace(ciLookup(env, "CI_PROJECT_DIR")) != "" {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(ciLookup(env, "GITLAB_CI")), "true") {
+		return true
+	}
+	return false
+}
+
+func resolveContainerProjectDirToHost(containerProjectDir string, mounts []container.MountPoint) string {
+	projectDir := path.Clean(strings.TrimSpace(containerProjectDir))
+	if projectDir == "" || projectDir == "." {
+		return ""
+	}
+
+	bestDest := ""
+	bestSource := ""
+	for _, m := range mounts {
+		if strings.TrimSpace(m.Source) == "" {
+			continue
+		}
+		dest := path.Clean(strings.TrimSpace(m.Destination))
+		if dest == "" || dest == "." {
+			continue
+		}
+		if projectDir != dest && !strings.HasPrefix(projectDir, dest+"/") {
+			continue
+		}
+		if len(dest) > len(bestDest) {
+			bestDest = dest
+			bestSource = m.Source
+		}
+	}
+
+	if bestDest == "" {
+		return ""
+	}
+
+	rel := strings.TrimPrefix(projectDir, bestDest)
+	rel = strings.TrimPrefix(rel, "/")
+	if rel == "" {
+		return bestSource
+	}
+
+	return filepath.Join(bestSource, filepath.FromSlash(rel))
 }
 
 func dockerSourceDirFallback(mounts []container.MountPoint) string {
