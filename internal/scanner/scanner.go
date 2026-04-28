@@ -49,8 +49,6 @@ func init() {
 	titusCore.SetCanValidate(func(ruleID string) bool {
 		return gitlab.CanValidate(ruleID)
 	})
-
-	log.Info().Int("rules", len(rules)).Msg("Initialized Titus scanner with builtin and embedded custom rules")
 }
 
 // Scan scans the given environment variables and files under scanDir for secrets

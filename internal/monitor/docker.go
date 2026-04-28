@@ -74,11 +74,11 @@ func dockerHostForOS(goos string) (string, error) {
 		return "unix:///var/run/docker.sock", nil
 	}
 
-	if strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe://") {
+	if strings.HasPrefix(host, "unix://") || strings.HasPrefix(host, "npipe://") || strings.HasPrefix(host, "tcp://") {
 		return host, nil
 	}
 
-	return "", fmt.Errorf("unsupported DOCKER_HOST %q: phase 1 supports local unix/npipe daemons only", host)
+	return "", fmt.Errorf("unsupported DOCKER_HOST %q: supported schemes are unix://, npipe://, tcp://", host)
 }
 
 func (s *sdkDockerProvider) Close() error {

@@ -102,3 +102,19 @@ func TestCanAccessDockerDaemonUnix(t *testing.T) {
 		t.Fatalf("expected unix socket daemon to be accessible")
 	}
 }
+
+func TestCanAccessDockerDaemonTCP(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	defer ln.Close()
+
+	if !canAccessDockerDaemon("linux", "tcp://"+ln.Addr().String()) {
+		t.Fatalf("expected tcp daemon endpoint to be accessible")
+	}
+
+	if canAccessDockerDaemon("linux", "tcp://127.0.0.1:1") {
+		t.Fatalf("expected unreachable tcp endpoint to be inaccessible")
+	}
+}

@@ -26,10 +26,14 @@ func TestDockerHostForOSDefaults(t *testing.T) {
 	}
 }
 
-func TestDockerHostForOSRejectsRemoteHost(t *testing.T) {
+func TestDockerHostForOSAcceptsTCPHost(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
-	if _, err := dockerHostForOS("linux"); err == nil {
-		t.Fatalf("expected remote docker host to be rejected")
+	host, err := dockerHostForOS("linux")
+	if err != nil {
+		t.Fatalf("dockerHostForOS tcp host: %v", err)
+	}
+	if host != "tcp://127.0.0.1:2375" {
+		t.Fatalf("unexpected tcp host: %q", host)
 	}
 }
 

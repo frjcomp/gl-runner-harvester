@@ -2,6 +2,7 @@ package detector
 
 import (
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,6 +86,19 @@ func canAccessDockerDaemon(goos, host string) bool {
 			return true
 		}
 		return false
+	}
+
+	if strings.HasPrefix(host, "tcp://") {
+		u, err := url.Parse(host)
+		if err != nil || u.Host == "" {
+			return false
+		}
+		conn, err := net.DialTimeout("tcp", u.Host, 1500*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
 	}
 
 	return false
