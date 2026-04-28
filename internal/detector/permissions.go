@@ -1,10 +1,13 @@
 package detector
 
 import (
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // PermissionInfo holds details about the current process privileges.
@@ -14,6 +17,8 @@ type PermissionInfo struct {
 	UID                  int
 	RunnerBinaryPath     string
 	RunnerBinaryWritable bool
+	DockerHost           string
+	DockerDaemonReadable bool
 }
 
 // CheckPermissions inspects process privileges for the given OS.
@@ -34,7 +39,55 @@ func CheckPermissions(goos string) PermissionInfo {
 		info.RunnerBinaryWritable = isWritable(info.RunnerBinaryPath)
 	}
 
+	info.DockerHost = detectDockerHost(goos)
+	info.DockerDaemonReadable = canAccessDockerDaemon(goos, info.DockerHost)
+
 	return info
+}
+
+func detectDockerHost(goos string) string {
+	if v := strings.TrimSpace(os.Getenv("DOCKER_HOST")); v != "" {
+		return v
+	}
+	if goos == "windows" {
+		return "npipe:////./pipe/docker_engine"
+	}
+	return "unix:///var/run/docker.sock"
+}
+
+func canAccessDockerDaemon(goos, host string) bool {
+	if strings.HasPrefix(host, "unix://") {
+		path := strings.TrimPrefix(host, "unix://")
+		if path == "" {
+			return false
+		}
+		if _, err := os.Stat(path); err != nil {
+			return false
+		}
+		conn, err := net.DialTimeout("unix", path, 1500*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		_ = conn.Close()
+		return true
+	}
+
+	if strings.HasPrefix(host, "npipe://") {
+		pipePath := strings.TrimPrefix(host, "npipe://")
+		pipePath = strings.TrimPrefix(pipePath, "/")
+		pipePath = filepath.FromSlash(pipePath)
+		if goos == "windows" {
+			f, err := os.OpenFile(pipePath, os.O_RDWR, 0)
+			if err != nil {
+				return false
+			}
+			_ = f.Close()
+			return true
+		}
+		return false
+	}
+
+	return false
 }
 
 func currentUsername() string {

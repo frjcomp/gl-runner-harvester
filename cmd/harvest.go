@@ -76,6 +76,8 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 		Str("username", permInfo.Username).
 		Bool("runner_writable", permInfo.RunnerBinaryWritable).
 		Str("runner_path", permInfo.RunnerBinaryPath).
+		Str("docker_host", permInfo.DockerHost).
+		Bool("docker_daemon_readable", permInfo.DockerDaemonReadable).
 		Msg("Permission check")
 
 	// 4. Print detection summary
@@ -132,7 +134,11 @@ func printDetectionSummary(osInfo detector.OSInfo, execType detector.ExecutorTyp
 			log.Info().Msg("Linux/macOS shell executor: checking root or custom user context")
 		}
 	case detector.Docker:
-		log.Info().Msg("Docker executor: will monitor build tmp directories")
+		if permInfo.DockerDaemonReadable {
+			log.Info().Str("docker_host", permInfo.DockerHost).Msg("Docker executor: Docker API monitoring enabled with directory fallback")
+		} else {
+			log.Warn().Str("docker_host", permInfo.DockerHost).Msg("Docker executor: daemon access unavailable, using directory fallback only")
+		}
 	case detector.Kubernetes:
 		log.Info().Msg("Kubernetes executor: will monitor build directories and env vars")
 	default:

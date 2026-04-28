@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,9 +13,8 @@ import (
 )
 
 type fakeHarvester struct {
-	current []string
-	jobs    []string
-	procs   []string
+	jobs  []string
+	procs []string
 }
 
 func (f *fakeHarvester) HarvestJob(jobDir string) error {
@@ -27,6 +27,23 @@ func (f *fakeHarvester) HarvestProcess(jobID string, _ map[string]string, _ stri
 	return nil
 }
 
+type fakeStrategy struct {
+	mode string
+	jobs []discoveredJob
+	err  error
+}
+
+func (f *fakeStrategy) Mode() string {
+	return f.mode
+}
+
+func (f *fakeStrategy) Discover(context.Context) ([]discoveredJob, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.jobs, nil
+}
+
 func TestNew(t *testing.T) {
 	h := &fakeHarvester{}
 	m := New(detector.OSInfo{OS: "linux"}, detector.Shell, 3, h)
@@ -35,6 +52,9 @@ func TestNew(t *testing.T) {
 	}
 	if m.interval != 3*time.Second {
 		t.Fatalf("unexpected interval: %v", m.interval)
+	}
+	if m.strategy == nil {
+		t.Fatalf("expected strategy")
 	}
 }
 
@@ -92,8 +112,12 @@ func TestPollHarvestsNewDirectories(t *testing.T) {
 	}
 
 	h := &fakeHarvester{}
-	m := &Monitor{h: h, seen: map[string]struct{}{}}
-	m.poll([]string{tmp})
+	m := &Monitor{
+		h:        h,
+		seen:     map[string]struct{}{},
+		strategy: &directoryDiscoveryStrategy{mode: "test-dir", dirs: []string{tmp}},
+	}
+	m.poll(context.Background())
 
 	if len(h.jobs) != 1 {
 		t.Fatalf("expected one harvested job, got %d", len(h.jobs))
@@ -102,21 +126,71 @@ func TestPollHarvestsNewDirectories(t *testing.T) {
 		t.Fatalf("unexpected job dir: %s", h.jobs[0])
 	}
 
-	// Already seen should not re-harvest.
-	m.poll([]string{tmp})
+	m.poll(context.Background())
 	if len(h.jobs) != 1 {
 		t.Fatalf("expected no duplicate harvests")
 	}
 }
 
+func TestPollHarvestsNewProcessJobs(t *testing.T) {
+	h := &fakeHarvester{}
+	m := &Monitor{
+		h:    h,
+		seen: map[string]struct{}{},
+		strategy: &processDiscoveryStrategy{
+			mode: "test-proc",
+			lister: func() ([]processJob, error) {
+				return []processJob{
+					{PID: 11, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}},
+					{PID: 12, JobID: "102", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "102"}},
+				}, nil
+			},
+		},
+	}
+
+	m.poll(context.Background())
+	if len(h.procs) != 2 {
+		t.Fatalf("expected two harvested process jobs, got %d", len(h.procs))
+	}
+
+	m.strategy = &processDiscoveryStrategy{
+		mode: "test-proc",
+		lister: func() ([]processJob, error) {
+			return []processJob{{PID: 99, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}}}, nil
+		},
+	}
+	m.poll(context.Background())
+	if len(h.procs) != 2 {
+		t.Fatalf("expected deduped process jobs, got %d", len(h.procs))
+	}
+}
+
+func TestPollHandlesStrategyError(t *testing.T) {
+	h := &fakeHarvester{}
+	m := &Monitor{
+		h:        h,
+		seen:     map[string]struct{}{},
+		strategy: &fakeStrategy{mode: "test", err: fmt.Errorf("boom")},
+	}
+
+	m.poll(context.Background())
+	if len(h.jobs) != 0 || len(h.procs) != 0 {
+		t.Fatalf("did not expect harvest calls on strategy error")
+	}
+}
+
 func TestStartLoopCanceled(t *testing.T) {
 	h := &fakeHarvester{}
-	m := &Monitor{h: h, seen: map[string]struct{}{}}
+	m := &Monitor{
+		h:        h,
+		seen:     map[string]struct{}{},
+		strategy: &fakeStrategy{mode: "test"},
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := m.startLoop(ctx, make(chan time.Time), nil)
+	err := m.startLoop(ctx, make(chan time.Time))
 	if err == nil {
 		t.Fatalf("expected context cancellation error")
 	}
@@ -140,57 +214,34 @@ func TestStartWithInjectedCanceledContext(t *testing.T) {
 	}
 }
 
-func TestPollProcessesHarvestsNewJobIDs(t *testing.T) {
-	h := &fakeHarvester{}
-	m := &Monitor{
-		h:    h,
-		seen: map[string]struct{}{},
-		listProc: func() ([]processJob, error) {
-			return []processJob{
-				{PID: 11, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}},
-				{PID: 12, JobID: "102", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "102"}},
-			}, nil
-		},
-	}
-
-	m.pollProcesses()
-	if len(h.procs) != 2 {
-		t.Fatalf("expected two harvested process jobs, got %d", len(h.procs))
-	}
-
-	// Duplicate job IDs should not be harvested again.
-	m.listProc = func() ([]processJob, error) {
-		return []processJob{{PID: 99, JobID: "101", Cmdline: "bash", Env: map[string]string{"CI_JOB_ID": "101"}}}, nil
-	}
-	m.pollProcesses()
-	if len(h.procs) != 2 {
-		t.Fatalf("expected deduped process jobs, got %d", len(h.procs))
-	}
-}
-
-func TestNewUsesProcessListerForLinuxShell(t *testing.T) {
+func TestNewUsesProcessStrategyForLinuxShell(t *testing.T) {
 	h := &fakeHarvester{}
 	m := New(detector.OSInfo{OS: "linux"}, detector.Shell, 1, h)
-	if m.listProc == nil {
-		t.Fatalf("expected process lister for linux shell")
-	}
-
-	m = New(detector.OSInfo{OS: "linux"}, detector.Docker, 1, h)
-	if m.listProc != nil {
-		t.Fatalf("did not expect process lister for linux docker")
+	if m.strategy == nil || m.strategy.Mode() != "shell-proc-linux" {
+		t.Fatalf("expected linux shell process strategy, got %v", m.strategy)
 	}
 }
 
-func TestNewUsesProcessListerForWindowsShell(t *testing.T) {
+func TestNewUsesProcessStrategyForWindowsShell(t *testing.T) {
 	h := &fakeHarvester{}
 	m := New(detector.OSInfo{OS: "windows"}, detector.Shell, 1, h)
-	if m.listProc == nil {
-		t.Fatalf("expected process lister for windows shell")
+	if m.strategy == nil || m.strategy.Mode() != "shell-proc-windows" {
+		t.Fatalf("expected windows shell process strategy, got %v", m.strategy)
+	}
+}
+
+func TestDockerStrategyFallbackToDirectory(t *testing.T) {
+	oldFactory := newDockerStrategy
+	defer func() { newDockerStrategy = oldFactory }()
+
+	newDockerStrategy = func(detector.OSInfo) (*strategyWithCloser, error) {
+		return nil, fmt.Errorf("no daemon")
 	}
 
-	m = New(detector.OSInfo{OS: "windows"}, detector.Docker, 1, h)
-	if m.listProc != nil {
-		t.Fatalf("did not expect process lister for windows docker")
+	h := &fakeHarvester{}
+	m := New(detector.OSInfo{OS: "linux"}, detector.Docker, 1, h)
+	if m.strategy == nil || m.strategy.Mode() != "docker-dir-fallback" {
+		t.Fatalf("expected docker directory fallback strategy, got %v", m.strategy)
 	}
 }
 

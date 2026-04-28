@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -66,5 +67,38 @@ func TestCheckPermissionsBasic(t *testing.T) {
 	info := CheckPermissions("linux")
 	if info.Username != "tester" {
 		t.Fatalf("expected username tester, got %q", info.Username)
+	}
+}
+
+func TestDetectDockerHostDefaults(t *testing.T) {
+	t.Setenv("DOCKER_HOST", "")
+	if got := detectDockerHost("linux"); got != "unix:///var/run/docker.sock" {
+		t.Fatalf("unexpected linux default docker host: %q", got)
+	}
+	if got := detectDockerHost("windows"); got != "npipe:////./pipe/docker_engine" {
+		t.Fatalf("unexpected windows default docker host: %q", got)
+	}
+
+	t.Setenv("DOCKER_HOST", "unix:///tmp/custom.sock")
+	if got := detectDockerHost("linux"); got != "unix:///tmp/custom.sock" {
+		t.Fatalf("expected env override docker host, got %q", got)
+	}
+}
+
+func TestCanAccessDockerDaemonUnix(t *testing.T) {
+	if canAccessDockerDaemon("linux", "unix:///tmp/does-not-exist.sock") {
+		t.Fatalf("expected missing unix socket to be inaccessible")
+	}
+
+	tmp := t.TempDir()
+	sock := filepath.Join(tmp, "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	defer ln.Close()
+
+	if !canAccessDockerDaemon("linux", "unix://"+sock) {
+		t.Fatalf("expected unix socket daemon to be accessible")
 	}
 }

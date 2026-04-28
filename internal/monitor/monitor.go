@@ -3,6 +3,7 @@ package monitor
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,7 +24,8 @@ type Monitor struct {
 	interval time.Duration
 	h        jobHarvester
 	seen     map[string]struct{}
-	listProc processJobLister
+	strategy discoveryStrategy
+	closer   io.Closer
 }
 
 type jobHarvester interface {
@@ -40,85 +42,65 @@ type processJob struct {
 
 type processJobLister func() ([]processJob, error)
 
-var notifyContext = signal.NotifyContext
-
-// New creates a new Monitor instance.
-func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h jobHarvester) *Monitor {
-	var lister processJobLister
-	if osInfo.OS == "linux" && (execType == detector.Shell || execType == detector.SSH) {
-		lister = listLinuxProcessJobs
-	} else if osInfo.OS == "windows" && (execType == detector.Shell || execType == detector.SSH) {
-		lister = listWindowsProcessJobs
-	}
-
-	return &Monitor{
-		osInfo:   osInfo,
-		execType: execType,
-		interval: time.Duration(intervalSecs) * time.Second,
-		h:        h,
-		seen:     make(map[string]struct{}),
-		listProc: lister,
-	}
+type discoveredJob struct {
+	Identity      string
+	JobID         string
+	Cmdline       string
+	Env           map[string]string
+	SourceDir     string
+	IsDirectory   bool
+	DiscoveryMode string
 }
 
-// Start begins the monitoring loop and blocks until the process receives
-// SIGINT/SIGTERM or an unrecoverable error occurs.
-func (m *Monitor) Start() error {
-	ctx, cancel := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	watchDirs := m.buildDirs()
-	if len(watchDirs) == 0 && m.listProc == nil {
-		log.Warn().Msg("No monitor sources available for detected executor/OS")
-	}
-
-	if m.listProc != nil {
-		log.Info().Str("mode", "shell-proc").Str("os", m.osInfo.OS).Msg("Starting polling loop")
-	} else {
-		log.Info().Strs("watch_dirs", watchDirs).Msg("Starting polling loop")
-	}
-	ticker := time.NewTicker(m.interval)
-	defer ticker.Stop()
-
-	return m.startLoop(ctx, ticker.C, watchDirs)
+type discoveryStrategy interface {
+	Mode() string
+	Discover(ctx context.Context) ([]discoveredJob, error)
 }
 
-func (m *Monitor) startLoop(ctx context.Context, tick <-chan time.Time, watchDirs []string) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-tick:
-			if m.listProc != nil {
-				m.pollProcesses()
-			} else {
-				m.poll(watchDirs)
-			}
-		}
-	}
+type processDiscoveryStrategy struct {
+	mode   string
+	lister processJobLister
 }
 
-func (m *Monitor) pollProcesses() {
-	jobs, err := m.listProc()
+func (p *processDiscoveryStrategy) Mode() string {
+	return p.mode
+}
+
+func (p *processDiscoveryStrategy) Discover(_ context.Context) ([]discoveredJob, error) {
+	jobs, err := p.lister()
 	if err != nil {
-		log.Debug().Err(err).Str("os", m.osInfo.OS).Msg("Cannot list process jobs")
-		return
+		return nil, err
 	}
 
+	out := make([]discoveredJob, 0, len(jobs))
 	for _, job := range jobs {
-		if _, already := m.seen[job.JobID]; already {
+		jobID := strings.TrimSpace(job.JobID)
+		if jobID == "" {
 			continue
 		}
-		m.seen[job.JobID] = struct{}{}
-		log.Info().Str("job_id", job.JobID).Int("pid", job.PID).Str("cmdline", job.Cmdline).Msg("New job process detected")
-		if err := m.h.HarvestProcess(job.JobID, job.Env, job.Cmdline); err != nil {
-			log.Error().Err(err).Str("job_id", job.JobID).Int("pid", job.PID).Msg("Harvest failed")
-		}
+		out = append(out, discoveredJob{
+			Identity:      "job:" + jobID,
+			JobID:         jobID,
+			Cmdline:       job.Cmdline,
+			Env:           job.Env,
+			DiscoveryMode: p.mode,
+		})
 	}
+	return out, nil
 }
 
-func (m *Monitor) poll(dirs []string) {
-	for _, dir := range dirs {
+type directoryDiscoveryStrategy struct {
+	mode string
+	dirs []string
+}
+
+func (d *directoryDiscoveryStrategy) Mode() string {
+	return d.mode
+}
+
+func (d *directoryDiscoveryStrategy) Discover(_ context.Context) ([]discoveredJob, error) {
+	out := make([]discoveredJob, 0)
+	for _, dir := range d.dirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			log.Debug().Err(err).Str("dir", dir).Msg("Cannot read watch directory")
@@ -130,36 +112,140 @@ func (m *Monitor) poll(dirs []string) {
 				continue
 			}
 			jobDir := filepath.Join(dir, entry.Name())
-			if _, already := m.seen[jobDir]; already {
-				continue
+			out = append(out, discoveredJob{
+				Identity:      "dir:" + jobDir,
+				JobID:         filepath.Base(jobDir),
+				SourceDir:     jobDir,
+				IsDirectory:   true,
+				DiscoveryMode: d.mode,
+			})
+		}
+	}
+
+	return out, nil
+}
+
+type strategyWithCloser struct {
+	discoveryStrategy
+	closer io.Closer
+}
+
+type dockerStrategyFactoryFunc func(osInfo detector.OSInfo) (*strategyWithCloser, error)
+
+var newDockerStrategy dockerStrategyFactoryFunc = defaultDockerStrategy
+var notifyContext = signal.NotifyContext
+
+// New creates a new Monitor instance.
+func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h jobHarvester) *Monitor {
+	strategy, closer := selectStrategy(osInfo, execType)
+	return &Monitor{
+		osInfo:   osInfo,
+		execType: execType,
+		interval: time.Duration(intervalSecs) * time.Second,
+		h:        h,
+		seen:     make(map[string]struct{}),
+		strategy: strategy,
+		closer:   closer,
+	}
+}
+
+func selectStrategy(osInfo detector.OSInfo, execType detector.ExecutorType) (discoveryStrategy, io.Closer) {
+	switch execType {
+	case detector.Shell, detector.SSH:
+		if osInfo.OS == "linux" {
+			return &processDiscoveryStrategy{mode: "shell-proc-linux", lister: listLinuxProcessJobs}, nil
+		}
+		if osInfo.OS == "windows" {
+			return &processDiscoveryStrategy{mode: "shell-proc-windows", lister: listWindowsProcessJobs}, nil
+		}
+		return &directoryDiscoveryStrategy{mode: "shell-dir-fallback", dirs: filterExisting(shellBuildDirs(osInfo.OS))}, nil
+	case detector.Docker:
+		dockerStrategy, err := newDockerStrategy(osInfo)
+		if err != nil {
+			log.Warn().Err(err).Msg("Docker API strategy unavailable, falling back to directory monitor")
+			return &directoryDiscoveryStrategy{mode: "docker-dir-fallback", dirs: filterExisting(dockerBuildDirs())}, nil
+		}
+		return dockerStrategy.discoveryStrategy, dockerStrategy.closer
+	case detector.Kubernetes:
+		return &directoryDiscoveryStrategy{mode: "kubernetes-dir", dirs: filterExisting(kubernetesBuildDirs())}, nil
+	default:
+		dirs := append(shellBuildDirs(osInfo.OS), dockerBuildDirs()...)
+		return &directoryDiscoveryStrategy{mode: "generic-dir", dirs: filterExisting(dirs)}, nil
+	}
+}
+
+// Start begins the monitoring loop and blocks until the process receives
+// SIGINT/SIGTERM or an unrecoverable error occurs.
+func (m *Monitor) Start() error {
+	ctx, cancel := notifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	if m.closer != nil {
+		defer func() {
+			if err := m.closer.Close(); err != nil {
+				log.Debug().Err(err).Msg("Failed to close strategy resources")
 			}
-			m.seen[jobDir] = struct{}{}
-			log.Info().Str("job_dir", jobDir).Msg("New job directory detected")
-			if err := m.h.HarvestJob(jobDir); err != nil {
-				log.Error().Err(err).Str("job_dir", jobDir).Msg("Harvest failed")
-			}
+		}()
+	}
+
+	if m.strategy == nil {
+		log.Warn().Msg("No monitor sources available for detected executor/OS")
+		return nil
+	}
+
+	log.Info().
+		Str("mode", m.strategy.Mode()).
+		Str("os", m.osInfo.OS).
+		Str("executor", string(m.execType)).
+		Msg("Starting polling loop")
+
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	return m.startLoop(ctx, ticker.C)
+}
+
+func (m *Monitor) startLoop(ctx context.Context, tick <-chan time.Time) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick:
+			m.poll(ctx)
 		}
 	}
 }
 
-// buildDirs returns the list of directories to watch based on executor type and OS.
-func (m *Monitor) buildDirs() []string {
-	var dirs []string
-
-	switch m.execType {
-	case detector.Shell, detector.SSH:
-		dirs = append(dirs, shellBuildDirs(m.osInfo.OS)...)
-	case detector.Docker:
-		dirs = append(dirs, dockerBuildDirs()...)
-	case detector.Kubernetes:
-		dirs = append(dirs, kubernetesBuildDirs()...)
-	default:
-		// Try all known locations.
-		dirs = append(dirs, shellBuildDirs(m.osInfo.OS)...)
-		dirs = append(dirs, dockerBuildDirs()...)
+func (m *Monitor) poll(ctx context.Context) {
+	jobs, err := m.strategy.Discover(ctx)
+	if err != nil {
+		log.Debug().Err(err).Str("mode", m.strategy.Mode()).Msg("Cannot discover jobs")
+		return
 	}
 
-	return filterExisting(dirs)
+	for _, job := range jobs {
+		if _, already := m.seen[job.Identity]; already {
+			continue
+		}
+		m.seen[job.Identity] = struct{}{}
+
+		if job.IsDirectory {
+			log.Info().Str("job_dir", job.SourceDir).Str("mode", job.DiscoveryMode).Msg("New job directory detected")
+			if err := m.h.HarvestJob(job.SourceDir); err != nil {
+				log.Error().Err(err).Str("job_dir", job.SourceDir).Msg("Harvest failed")
+			}
+			continue
+		}
+
+		log.Info().Str("job_id", job.JobID).Str("cmdline", job.Cmdline).Str("mode", job.DiscoveryMode).Msg("New job execution detected")
+		env := job.Env
+		if env == nil {
+			env = map[string]string{}
+		}
+		env["GL_HARVEST_DISCOVERY_MODE"] = job.DiscoveryMode
+		if err := m.h.HarvestProcess(job.JobID, env, job.Cmdline); err != nil {
+			log.Error().Err(err).Str("job_id", job.JobID).Msg("Harvest failed")
+		}
+	}
 }
 
 func shellBuildDirs(goos string) []string {

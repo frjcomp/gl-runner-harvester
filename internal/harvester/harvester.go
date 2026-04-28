@@ -30,6 +30,7 @@ func New(outputDir string, scanSecrets bool, gitlabURL string, harvestFiles bool
 type JobData struct {
 	JobID        string            `json:"job_id"`
 	Timestamp    time.Time         `json:"timestamp"`
+	Discovery    string            `json:"discovery"`
 	SourceDir    string            `json:"source_dir"`
 	EnvVars      map[string]string `json:"env_vars"`
 	CIVars       map[string]string `json:"ci_vars"`
@@ -39,7 +40,9 @@ type JobData struct {
 // HarvestJob harvests a specific job build directory.
 func (h *Harvester) HarvestJob(jobDir string) error {
 	jobID := deriveJobID(jobDir)
-	return h.harvest(jobID, jobDir, collectEnvVars())
+	env := collectEnvVars()
+	env["GL_HARVEST_DISCOVERY_MODE"] = "directory"
+	return h.harvest(jobID, jobDir, env)
 }
 
 // HarvestProcess harvests a job discovered from a host process snapshot.
@@ -50,6 +53,9 @@ func (h *Harvester) HarvestProcess(jobID string, env map[string]string, cmdline 
 	}
 	if env == nil {
 		env = map[string]string{}
+	}
+	if strings.TrimSpace(env["GL_HARVEST_DISCOVERY_MODE"]) == "" {
+		env["GL_HARVEST_DISCOVERY_MODE"] = "process"
 	}
 	sourceDir := strings.TrimSpace(env["CI_PROJECT_DIR"])
 	return h.harvest(jobID, sourceDir, env)
@@ -79,6 +85,7 @@ func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) 
 	data := JobData{
 		JobID:     jobID,
 		Timestamp: ts,
+		Discovery: strings.TrimSpace(envVars["GL_HARVEST_DISCOVERY_MODE"]),
 		SourceDir: sourceDir,
 		EnvVars:   envVars,
 		CIVars:    collectCIVarsFromMap(envVars),
