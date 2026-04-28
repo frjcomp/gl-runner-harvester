@@ -1,11 +1,13 @@
 package detector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/BurntSushi/toml"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,55 +22,286 @@ const (
 	Unknown    ExecutorType = "unknown"
 )
 
-// DetectExecutor determines the GitLab runner executor type and returns
-// related metadata discovered during detection.
-func DetectExecutor() (ExecutorType, map[string]string) {
+// Config represents the GitLab runner configuration structure.
+type Config struct {
+	Runners []Runner `toml:"runners"`
+}
+
+// Runner represents a single runner configuration in the TOML.
+type Runner struct {
+	Name     string `toml:"name"`
+	URL      string `toml:"url"`
+	Executor string `toml:"executor"`
+}
+
+// DetectExecutor determines the GitLab runner executor type by parsing the config file.
+// If configPath is empty, it searches standard locations for the config.toml.
+func DetectExecutor(configPath string) (ExecutorType, map[string]string) {
 	meta := make(map[string]string)
 
-	// Explicit executor env var set by some runner configurations.
-	if v := os.Getenv("CI_RUNNER_EXECUTOR"); v != "" {
-		meta["source"] = "CI_RUNNER_EXECUTOR"
-		meta["value"] = v
-		return normalizeExecutor(v), meta
+	// If no config path provided, find one
+	if configPath == "" {
+		if path, found, denied := findConfigToml(); found {
+			configPath = path
+		} else {
+			searched := configTomlCandidates()
+			if len(denied) > 0 {
+				meta["config_reason"] = "runner_config_permission_denied"
+				meta["permission_denied_paths"] = strings.Join(denied, ",")
+				log.Warn().
+					Strs("permission_denied_paths", denied).
+					Msg("GitLab runner config.toml exists but is not readable due to permissions; attempting disk artifact executor detection")
+				return detectExecutorFromArtifacts(meta)
+			}
+
+			meta["config_reason"] = "runner_config_not_found"
+			meta["searched_paths"] = strings.Join(searched, ",")
+			log.Warn().
+				Strs("searched_paths", searched).
+				Msg("GitLab runner config.toml not found; attempting disk artifact executor detection")
+			return detectExecutorFromArtifacts(meta)
+		}
 	}
 
-	// Kubernetes: check for the service host env var injected into every pod.
-	if v := os.Getenv("KUBERNETES_SERVICE_HOST"); v != "" {
-		meta["source"] = "KUBERNETES_SERVICE_HOST"
-		meta["kubernetes_service_host"] = v
+	// Try to parse the config file
+	if configPath != "" {
+		if execType, found, err := parseConfigToml(configPath, meta); found {
+			return execType, meta
+		} else if err != nil && errors.Is(err, os.ErrPermission) {
+			meta["config_reason"] = "runner_config_permission_denied"
+			meta["config_path"] = configPath
+			log.Warn().
+				Str("config", configPath).
+				Msg("GitLab runner config.toml is not readable due to permissions; attempting disk artifact executor detection")
+			return detectExecutorFromArtifacts(meta)
+		}
+
+		meta["config_reason"] = "runner_config_parse_failed"
+		meta["config_path"] = configPath
+		log.Warn().
+			Str("config", configPath).
+			Msg("Failed to parse GitLab runner config.toml; attempting disk artifact executor detection")
+		return detectExecutorFromArtifacts(meta)
+	}
+
+	return detectExecutorFromArtifacts(meta)
+}
+
+// parseConfigToml reads and parses the GitLab runner config.toml file as TOML.
+func parseConfigToml(configPath string, meta map[string]string) (ExecutorType, bool, error) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Debug().Err(err).Str("config", configPath).Msg("Failed to read config file")
+		return Unknown, false, err
+	}
+
+	var config Config
+	if err := toml.Unmarshal(data, &config); err != nil {
+		log.Debug().Err(err).Str("config", configPath).Msg("Failed to parse TOML config")
+		return Unknown, false, err
+	}
+
+	log.Debug().Str("config", configPath).Int("runners", len(config.Runners)).Msg("Parsed gitlab-runner config.toml")
+	meta["config_path"] = configPath
+	meta["source"] = "config.toml"
+
+	if len(config.Runners) > 1 {
+		log.Warn().
+			Str("config", configPath).
+			Int("runners", len(config.Runners)).
+			Msg("Multiple runners detected in config.toml; only the first runner is used")
+	}
+
+	// Get executor from first runner
+	if len(config.Runners) > 0 {
+		runner := config.Runners[0]
+		if runner.Executor != "" {
+			meta["executor_value"] = runner.Executor
+			meta["runner_name"] = runner.Name
+			return normalizeExecutor(runner.Executor), true, nil
+		}
+	}
+
+	return Unknown, false, nil
+}
+
+// findConfigToml searches standard locations for the config.toml file.
+func findConfigToml() (string, bool, []string) {
+	candidates := configTomlCandidates()
+	permissionDenied := make([]string, 0)
+
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, true, nil
+		} else if errors.Is(err, os.ErrPermission) {
+			permissionDenied = append(permissionDenied, p)
+		}
+	}
+
+	return "", false, permissionDenied
+}
+
+func configTomlCandidates() []string {
+	candidates := []string{
+		"/etc/gitlab-runner/config.toml",
+	}
+
+	if runtime.GOOS == "windows" {
+		candidates = append(candidates, `C:\GitLab-Runner\config.toml`)
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, filepath.Join(home, ".gitlab-runner", "config.toml"))
+	}
+
+	return candidates
+}
+
+func detectExecutorFromArtifacts(meta map[string]string) (ExecutorType, map[string]string) {
+	if artifacts, confidence := kubernetesArtifacts(); len(artifacts) >= 2 {
+		meta["source"] = "disk_artifacts"
+		meta["reason"] = "kubernetes_artifacts_detected"
+		meta["confidence"] = confidence
+		meta["artifacts_found"] = strings.Join(artifacts, ",")
 		return Kubernetes, meta
 	}
 
-	// Docker: check for /.dockerenv (created by Docker daemon) or cgroup hint.
-	if isInsideDocker() {
-		meta["source"] = "docker_detection"
+	if artifacts, confidence := dockerArtifacts(); len(artifacts) >= 2 {
+		meta["source"] = "disk_artifacts"
+		meta["reason"] = "docker_artifacts_detected"
+		meta["confidence"] = confidence
+		meta["artifacts_found"] = strings.Join(artifacts, ",")
 		return Docker, meta
 	}
 
-	// CI_SHARED_ENVIRONMENT indicates shell or SSH executor.
-	if os.Getenv("CI_SHARED_ENVIRONMENT") == "true" {
-		meta["source"] = "CI_SHARED_ENVIRONMENT"
-		// SSH executor is a sub-type of shell; we distinguish it here if possible.
-		if os.Getenv("SSH_CONNECTION") != "" || os.Getenv("SSH_CLIENT") != "" {
-			meta["ssh_detected"] = "true"
-			return SSH, meta
-		}
+	if artifacts, confidence := shellArtifacts(); len(artifacts) > 0 {
+		meta["source"] = "disk_artifacts"
+		meta["reason"] = "shell_host_artifacts_detected"
+		meta["confidence"] = confidence
+		meta["artifacts_found"] = strings.Join(artifacts, ",")
 		return Shell, meta
 	}
 
-	// Attempt to parse the runner config.toml for executor type.
-	if execType, found := detectFromConfigToml(meta); found {
-		return execType, meta
-	}
-
-	// If we are inside a CI environment but could not determine the type,
-	// fall back to shell as the most common case.
-	if os.Getenv("CI") == "true" || os.Getenv("GITLAB_CI") == "true" {
-		meta["source"] = "CI_env_fallback"
-		return Shell, meta
-	}
-
+	meta["source"] = "disk_artifacts"
+	meta["reason"] = "insufficient_disk_markers"
+	meta["confidence"] = "low"
+	log.Warn().Msg("Could not determine executor from disk artifacts; using unknown executor")
 	return Unknown, meta
+}
+
+func kubernetesArtifacts() ([]string, string) {
+	artifacts := make([]string, 0, 4)
+	for _, path := range []string{
+		"/var/run/secrets/kubernetes.io/serviceaccount/token",
+		"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+		"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+	} {
+		if fileExists(path) {
+			artifacts = append(artifacts, path)
+		}
+	}
+
+	if cgroupContains("kubepods") {
+		artifacts = append(artifacts, "/proc/1/cgroup:kubepods")
+	}
+
+	confidence := "medium"
+	if len(artifacts) >= 3 {
+		confidence = "high"
+	}
+
+	return artifacts, confidence
+}
+
+func dockerArtifacts() ([]string, string) {
+	artifacts := make([]string, 0, 3)
+	if fileExists("/.dockerenv") {
+		artifacts = append(artifacts, "/.dockerenv")
+	}
+	if dirExists("/builds") {
+		artifacts = append(artifacts, "/builds")
+	}
+	if cgroupContains("docker") || cgroupContains("containerd") {
+		artifacts = append(artifacts, "/proc/1/cgroup:container")
+	}
+
+	confidence := "medium"
+	if len(artifacts) >= 2 && containsString(artifacts, "/.dockerenv") && containsString(artifacts, "/builds") {
+		confidence = "high"
+	}
+
+	return artifacts, confidence
+}
+
+func shellArtifacts() ([]string, string) {
+	artifacts := make([]string, 0, 6)
+	for _, path := range []string{
+		"/var/lib/gitlab-runner/builds",
+		"/home/gitlab-runner/builds",
+		"/etc/gitlab-runner",
+		"/usr/bin/gitlab-runner",
+		"/usr/local/bin/gitlab-runner",
+	} {
+		if path == "/etc/gitlab-runner" || strings.HasSuffix(path, "/builds") {
+			if dirExists(path) {
+				artifacts = append(artifacts, path)
+			}
+			continue
+		}
+		if fileExists(path) {
+			artifacts = append(artifacts, path)
+		}
+	}
+
+	if home, err := os.UserHomeDir(); err == nil {
+		userConfig := filepath.Join(home, ".gitlab-runner", "config.toml")
+		if fileExists(userConfig) {
+			artifacts = append(artifacts, userConfig)
+		}
+	}
+
+	confidence := "medium"
+	if containsSuffix(artifacts, "/builds") {
+		confidence = "high"
+	}
+
+	return artifacts, confidence
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+func cgroupContains(marker string) bool {
+	data, err := os.ReadFile("/proc/1/cgroup")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), marker)
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSuffix(values []string, suffix string) bool {
+	for _, value := range values {
+		if strings.HasSuffix(value, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeExecutor(v string) ExecutorType {
@@ -84,60 +317,4 @@ func normalizeExecutor(v string) ExecutorType {
 	default:
 		return Unknown
 	}
-}
-
-func isInsideDocker() bool {
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		return true
-	}
-
-	data, err := os.ReadFile("/proc/1/cgroup")
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	return strings.Contains(content, "docker") || strings.Contains(content, "containerd")
-}
-
-// detectFromConfigToml tries to read the GitLab runner config.toml and parse the executor type.
-func detectFromConfigToml(meta map[string]string) (ExecutorType, bool) {
-	candidates := configTomlPaths()
-	for _, p := range candidates {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		log.Debug().Str("config", p).Msg("Found gitlab-runner config.toml")
-		meta["config_path"] = p
-		content := string(data)
-		for _, line := range strings.Split(content, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "executor") {
-				parts := strings.SplitN(line, "=", 2)
-				if len(parts) == 2 {
-					val := strings.Trim(strings.TrimSpace(parts[1]), `"`)
-					meta["source"] = "config.toml"
-					meta["executor_value"] = val
-					return normalizeExecutor(val), true
-				}
-			}
-		}
-	}
-	return Unknown, false
-}
-
-func configTomlPaths() []string {
-	paths := []string{
-		"/etc/gitlab-runner/config.toml",
-	}
-
-	if runtime.GOOS == "windows" {
-		paths = append(paths, `C:\GitLab-Runner\config.toml`)
-	}
-
-	if home, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(home, ".gitlab-runner", "config.toml"))
-	}
-
-	return paths
 }

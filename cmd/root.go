@@ -55,9 +55,27 @@ func configureLogging(level string) error {
 }
 
 func Execute() {
+	args := os.Args[1:]
+	if shouldDefaultToHarvest(args) {
+		rootCmd.SetArgs(append([]string{"harvest"}, args...))
+	}
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+func shouldDefaultToHarvest(args []string) bool {
+	if len(args) == 0 {
+		return true
+	}
+
+	first := args[0]
+	if first == "harvest" || first == "version" || first == "help" {
+		return false
+	}
+
+	return strings.HasPrefix(first, "-")
 }
 
 func init() {

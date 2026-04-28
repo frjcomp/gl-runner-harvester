@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
 	"github.com/frjcomp/gl-runner-harvester/internal/harvester"
 	"github.com/frjcomp/gl-runner-harvester/internal/monitor"
@@ -9,9 +12,11 @@ import (
 )
 
 var (
-	outputDir string
-	interval  int
-	scanSecrets bool
+	outputDir    string
+	runnerConfig string
+	exectuor     string
+	interval     int
+	scanSecrets  bool
 )
 
 var harvestCmd = &cobra.Command{
@@ -24,7 +29,9 @@ copies source code and credentials, and optionally scans for secrets.`,
 
 func init() {
 	harvestCmd.Flags().StringVar(&outputDir, "output-dir", "/tmp/gl-harvest", "Directory to store harvested data")
-	harvestCmd.Flags().IntVar(&interval, "interval", 30, "Polling interval in seconds")
+	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
+	harvestCmd.Flags().StringVar(&exectuor, "exectuor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
+	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
 }
 
@@ -38,7 +45,18 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 		Msg("Detected OS info")
 
 	// 2. Detect executor type
-	execType, execMeta := detector.DetectExecutor()
+	execType, execMeta := detector.DetectExecutor(runnerConfig)
+	if exectuor != "" {
+		manualExecType, err := parseManualExecutor(exectuor)
+		if err != nil {
+			return err
+		}
+		execType = manualExecType
+		execMeta = map[string]string{
+			"source":         "manual_flag",
+			"executor_value": string(manualExecType),
+		}
+	}
 	log.Info().
 		Str("executor", string(execType)).
 		Interface("metadata", execMeta).
@@ -85,5 +103,27 @@ func printDetectionSummary(osInfo detector.OSInfo, execType detector.ExecutorTyp
 
 	if permInfo.IsPrivileged {
 		log.Warn().Msg("Running with elevated privileges — full system access possible")
+	}
+
+	if osInfo.OS == "windows" && permInfo.RunnerBinaryWritable {
+		log.Warn().
+			Str("runner_path", permInfo.RunnerBinaryPath).
+			Msg("Writable gitlab-runner service binary detected; this can be abused for privilege escalation and lateral movement (https://docs.gitlab.com/runner/install/windows/)")
+	}
+}
+
+func parseManualExecutor(v string) (detector.ExecutorType, error) {
+	normalized := strings.ToLower(strings.TrimSpace(v))
+	switch normalized {
+	case string(detector.Shell):
+		return detector.Shell, nil
+	case string(detector.SSH):
+		return detector.SSH, nil
+	case string(detector.Docker):
+		return detector.Docker, nil
+	case string(detector.Kubernetes):
+		return detector.Kubernetes, nil
+	default:
+		return detector.Unknown, fmt.Errorf("invalid --exectuor value %q (supported: shell, ssh, docker, kubernetes)", v)
 	}
 }

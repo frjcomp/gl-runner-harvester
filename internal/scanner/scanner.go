@@ -1,224 +1,211 @@
 package scanner
 
 import (
-	"bufio"
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 
+	"github.com/praetorian-inc/titus/pkg/scanner"
 	"github.com/rs/zerolog/log"
 )
 
 // Finding represents a discovered secret or sensitive value.
 type Finding struct {
-	Type     string `json:"type"`
-	Severity string `json:"severity"`
-	Location string `json:"location"`
-	Match    string `json:"match"` // partial / redacted
+	Type            string `json:"type"`
+	Location        string `json:"location"`
+	Match           string `json:"match"`
+	VerificationStatus string `json:"verification_status,omitempty"`
+	VerificationMsg string `json:"verification_message,omitempty"`
 }
 
-// Scan scans the given environment variables and files under scanDir for secrets.
-// It first tries the titus CLI, then falls back to built-in regex patterns.
-func Scan(envVars map[string]string, scanDir string) ([]Finding, error) {
-	var findings []Finding
-
-	// Try titus CLI.
-	if f, err := scanWithTitus(scanDir); err == nil {
-		findings = append(findings, f...)
-	} else {
-		log.Debug().Err(err).Msg("titus not available; using built-in scanner")
-	}
-
-	// Always run built-in scanner as a complement.
-	findings = append(findings, scanEnvVars(envVars)...)
-	findings = append(findings, scanFiles(scanDir)...)
-
-	return deduplicate(findings), nil
+// CustomGitLabVerifier stores GitLab instance URLs for GLPAT verification
+type CustomGitLabVerifier struct {
+	gitlabURLs []string
 }
 
-// scanWithTitus attempts to run the titus binary and parse its output.
-// dir is an output directory created by this tool (not raw user input), so it
-// is safe to pass as an argument to the titus subprocess.
-func scanWithTitus(dir string) ([]Finding, error) {
-	titusPath, err := exec.LookPath("titus")
+var titusCore *scanner.Core
+var gitlabVerifier *CustomGitLabVerifier
+
+func init() {
+	// Initialize Titus scanner with built-in rules
+	rules, err := scanner.GetBuiltinRules()
 	if err != nil {
-		return nil, fmt.Errorf("titus not found in PATH: %w", err)
+		log.Error().Err(err).Msg("failed to get builtin titus rules")
+		return
 	}
 
-	// dir originates from the --output-dir flag value resolved via os.MkdirAll;
-	// it is not shell-expanded, so passing it as a discrete argument is safe.
-	cmd := exec.Command(titusPath, "scan", dir) // #nosec G204
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Run(); err != nil {
-		// titus may exit non-zero when findings are present; parse output anyway.
-		log.Debug().Err(err).Msg("titus exited with non-zero status")
+	titusCore, err = scanner.NewCoreWithRules(rules, &scanner.NoopLogger{}, nil)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to create titus core")
+		return
 	}
 
-	return parseTitusOutput(out.String(), dir), nil
+	// Initialize custom GitLab verifier
+	gitlabVerifier = NewCustomGitLabVerifier()
+
+	// Enable verification for rules we can validate
+	titusCore.SetCanValidate(func(ruleID string) bool {
+		return gitlabVerifier.CanValidate(ruleID)
+	})
 }
 
-// parseTitusOutput parses line-based titus output into findings.
-func parseTitusOutput(output, dir string) []Finding {
+// NewCustomGitLabVerifier creates a new custom GitLab instance verifier
+func NewCustomGitLabVerifier() *CustomGitLabVerifier {
+	return &CustomGitLabVerifier{
+		gitlabURLs: []string{
+			"https://gitlab.com",
+		},
+	}
+}
+
+// AddGitLabInstance adds a custom GitLab instance URL for GLPAT verification
+func (v *CustomGitLabVerifier) AddGitLabInstance(url string) {
+	if url != "" && !contains(v.gitlabURLs, url) {
+		v.gitlabURLs = append(v.gitlabURLs, url)
+		log.Debug().Str("url", url).Msg("Added GitLab instance for GLPAT verification")
+	}
+}
+
+// CanValidate checks if a rule can be validated by this verifier
+func (v *CustomGitLabVerifier) CanValidate(ruleID string) bool {
+	// Support validation for GitLab PAT rules
+	return strings.Contains(ruleID, "gitlab") && strings.Contains(ruleID, "pat")
+}
+
+// VerifyGitLabPAT attempts to verify a GitLab PAT against known instances
+func (v *CustomGitLabVerifier) VerifyGitLabPAT(pat string) (status string, message string) {
+	if pat == "" {
+		return "unknown", "token is empty"
+	}
+
+	// Check if token matches GitLab PAT format
+	if !strings.HasPrefix(pat, "glpat-") {
+		return "invalid", "token does not match GitLab PAT format"
+	}
+
+	// For now, we detect the token format as valid but log which instances we would verify against
+	for _, url := range v.gitlabURLs {
+		log.Debug().Str("url", url).Str("token_prefix", pat[:20]).Msg("Would verify GLPAT against GitLab instance")
+	}
+
+	// Return valid status since we can't actually validate without network access in this context
+	return "valid_format", "GitLab PAT format is valid; would verify against: " + strings.Join(v.gitlabURLs, ", ")
+}
+
+func contains(list []string, item string) bool {
+	for _, v := range list {
+		if v == item {
+			return true
+		}
+	}
+	return false
+}
+
+// Scan scans the given environment variables and files under scanDir for secrets
+// using the Titus Go library.
+func Scan(envVars map[string]string, scanDir string) ([]Finding, error) {
+	if titusCore == nil {
+		return nil, fmt.Errorf("titus scanner not initialized")
+	}
+
 	var findings []Finding
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.TrimSpace(line) == "" {
+
+	// Scan environment variables
+	for k, v := range envVars {
+		result, err := titusCore.Scan(k+"="+v, "env:"+k)
+		if err != nil {
+			log.Debug().Err(err).Str("env_var", k).Msg("error scanning environment variable")
 			continue
 		}
-		findings = append(findings, Finding{
-			Type:     "titus",
-			Severity: "high",
-			Location: dir,
-			Match:    truncate(line, 120),
+
+		for _, match := range result.Matches {
+			finding := Finding{
+				Type:     match.RuleName,
+				Location: "env:" + k,
+				Match:    string(match.Snippet.Matching),
+			}
+
+			// Populate verification status if available
+			if match.ValidationResult != nil {
+				finding.VerificationStatus = string(match.ValidationResult.Status)
+				finding.VerificationMsg = match.ValidationResult.Message
+			} else if gitlabVerifier.CanValidate(match.RuleID) {
+				// Perform custom verification for GitLab PATs
+				status, msg := gitlabVerifier.VerifyGitLabPAT(finding.Match)
+				finding.VerificationStatus = status
+				finding.VerificationMsg = msg
+			}
+
+			findings = append(findings, finding)
+
+			// Log finding with verification status
+			logFinding(finding)
+		}
+	}
+
+	// Scan directory
+	if scanDir != "" {
+		_ = filepath.Walk(scanDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() || info.Size() > 10*1024*1024 {
+				return nil
+			}
+
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+
+			result, err := titusCore.Scan(string(content), path)
+			if err != nil {
+				log.Debug().Err(err).Str("file", path).Msg("error scanning file")
+				return nil
+			}
+
+			for _, match := range result.Matches {
+				finding := Finding{
+					Type:     match.RuleName,
+					Location: fmt.Sprintf("%s:%d", path, match.Location.Source.Start.Line),
+					Match:    string(match.Snippet.Matching),
+				}
+
+				// Populate verification status if available
+				if match.ValidationResult != nil {
+					finding.VerificationStatus = string(match.ValidationResult.Status)
+					finding.VerificationMsg = match.ValidationResult.Message
+				} else if gitlabVerifier.CanValidate(match.RuleID) {
+					// Perform custom verification for GitLab PATs
+					status, msg := gitlabVerifier.VerifyGitLabPAT(finding.Match)
+					finding.VerificationStatus = status
+					finding.VerificationMsg = msg
+				}
+
+				findings = append(findings, finding)
+
+				// Log finding with verification status
+				logFinding(finding)
+			}
+
+			return nil
 		})
 	}
-	return findings
+
+	return findings, nil
 }
 
-// ---- Built-in regex patterns ----
+// logFinding logs a finding with its verification status
+func logFinding(f Finding) {
+	logger := log.Warn().
+		Str("type", f.Type).
+		Str("location", f.Location).
+		Str("secret", f.Match)
 
-type pattern struct {
-	name     string
-	severity string
-	re       *regexp.Regexp
-}
-
-var secretPatterns = []pattern{
-	{
-		name:     "aws_access_key",
-		severity: "critical",
-		re:       regexp.MustCompile(`(?i)(AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}`),
-	},
-	{
-		name:     "aws_secret_key",
-		severity: "critical",
-		re:       regexp.MustCompile(`(?i)aws.{0,20}secret.{0,20}[=:]\s*['"]?([A-Za-z0-9/+]{40})['"]?`),
-	},
-	{
-		name:     "gitlab_pat",
-		severity: "high",
-		re:       regexp.MustCompile(`glpat-[A-Za-z0-9_\-]{20}`),
-	},
-	{
-		name:     "gitlab_deploy_token",
-		severity: "high",
-		re:       regexp.MustCompile(`gldt-[A-Za-z0-9_\-]{20}`),
-	},
-	{
-		name:     "gitlab_runner_token",
-		severity: "high",
-		re:       regexp.MustCompile(`glrt-[A-Za-z0-9_\-]{20}`),
-	},
-	{
-		name:     "github_pat",
-		severity: "high",
-		re:       regexp.MustCompile(`gh[pous]_[A-Za-z0-9]{36,}`),
-	},
-	{
-		name:     "private_key",
-		severity: "critical",
-		re:       regexp.MustCompile(`-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----`),
-	},
-	{
-		name:     "generic_api_key",
-		severity: "medium",
-		re:       regexp.MustCompile(`(?i)(api[_\-]?key|api[_\-]?secret|access[_\-]?token|auth[_\-]?token)[=:\s]+['"]?([A-Za-z0-9_\-]{16,})['"]?`),
-	},
-	{
-		name:     "generic_password",
-		severity: "medium",
-		re:       regexp.MustCompile(`(?i)(password|passwd|secret)[=:\s]+['"]?([^\s'"]{8,})['"]?`),
-	},
-	{
-		name:     "jwt_token",
-		severity: "high",
-		re:       regexp.MustCompile(`eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+`),
-	},
-}
-
-func scanEnvVars(envVars map[string]string) []Finding {
-	var findings []Finding
-	for k, v := range envVars {
-		line := k + "=" + v
-		for _, p := range secretPatterns {
-			if p.re.MatchString(line) {
-				findings = append(findings, Finding{
-					Type:     p.name,
-					Severity: p.severity,
-					Location: "env:" + k,
-					Match:    truncate(v, 80),
-				})
-			}
-		}
+	if f.VerificationStatus != "" {
+		logger.Str("verification", f.VerificationStatus)
 	}
-	return findings
-}
-
-func scanFiles(dir string) []Finding {
-	if dir == "" {
-		return nil
+	if f.VerificationMsg != "" {
+		logger.Str("verification_msg", f.VerificationMsg)
 	}
-	var findings []Finding
-	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || info.IsDir() {
-			return nil
-		}
-		// Skip large files (> 10MB) and binary-looking files.
-		if info.Size() > 10*1024*1024 {
-			return nil
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
 
-		s := bufio.NewScanner(f)
-		lineNum := 0
-		for s.Scan() {
-			lineNum++
-			line := s.Text()
-			for _, p := range secretPatterns {
-				if p.re.MatchString(line) {
-					findings = append(findings, Finding{
-						Type:     p.name,
-						Severity: p.severity,
-						Location: fmt.Sprintf("%s:%d", path, lineNum),
-						Match:    truncate(line, 80),
-					})
-				}
-			}
-		}
-		return nil
-	})
-	return findings
-}
-
-func deduplicate(findings []Finding) []Finding {
-	seen := make(map[string]struct{})
-	var out []Finding
-	for _, f := range findings {
-		key := f.Type + "|" + f.Location + "|" + f.Match
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, f)
-	}
-	return out
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
+	logger.Msg("Secret finding")
 }

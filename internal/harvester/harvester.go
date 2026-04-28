@@ -85,13 +85,6 @@ func (h *Harvester) harvest(jobID, sourceDir string) error {
 		} else {
 			data.ScanFindings = findings
 			log.Info().Int("findings", len(findings)).Msg("Secret scan complete")
-			for _, f := range findings {
-				log.Warn().
-					Str("type", f.Type).
-					Str("severity", f.Severity).
-					Str("location", f.Location).
-					Msg("Secret finding")
-			}
 		}
 	}
 
