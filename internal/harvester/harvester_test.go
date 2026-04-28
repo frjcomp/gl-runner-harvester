@@ -23,7 +23,7 @@ func TestCollectEnvVarsAndCIVars(t *testing.T) {
 		t.Fatalf("expected OTHER_SAMPLE in env map")
 	}
 
-	ci := collectCIVars()
+	ci := collectCIVarsFromMap(env)
 	if ci["CI_SAMPLE"] != "a" {
 		t.Fatalf("expected CI var")
 	}

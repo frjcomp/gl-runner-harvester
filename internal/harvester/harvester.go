@@ -141,10 +141,6 @@ func collectEnvVars() map[string]string {
 	return m
 }
 
-func collectCIVars() map[string]string {
-	return collectCIVarsFromMap(collectEnvVars())
-}
-
 func collectCIVarsFromMap(source map[string]string) map[string]string {
 	m := make(map[string]string)
 	for k, v := range source {
