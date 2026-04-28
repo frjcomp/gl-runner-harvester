@@ -1,0 +1,87 @@
+package cmd
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/frjcomp/gl-runner-harvester/internal/detector"
+)
+
+func TestNormalizeGitLabURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "default", input: "https://gitlab.com", want: "https://gitlab.com"},
+		{name: "host only", input: "gitlab.example.com", want: "https://gitlab.example.com"},
+		{name: "trim path and slash", input: "https://gitlab.example.com/api/", want: "https://gitlab.example.com/api"},
+		{name: "strip query and fragment", input: "https://gitlab.example.com/path?q=1#x", want: "https://gitlab.example.com/path"},
+		{name: "empty", input: "   ", wantErr: true},
+		{name: "invalid", input: "://bad", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeGitLabURL(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got none")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+func TestParseManualExecutor(t *testing.T) {
+	tests := []struct {
+		in      string
+		wantErr bool
+	}{
+		{in: "shell"},
+		{in: "SSH"},
+		{in: " docker "},
+		{in: "kubernetes"},
+		{in: "bad", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		_, err := parseManualExecutor(tc.in)
+		if tc.wantErr && err == nil {
+			t.Fatalf("input %q expected error", tc.in)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("input %q unexpected error: %v", tc.in, err)
+		}
+	}
+}
+
+func TestRunHarvestInvalidManualExecutor(t *testing.T) {
+	oldExec := exectuor
+	defer func() { exectuor = oldExec }()
+
+	exectuor = "invalid"
+	err := runHarvest(nil, nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid --exectuor") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrintDetectionSummaryNoPanic(t *testing.T) {
+	printDetectionSummary(
+		detector.OSInfo{OS: "linux"},
+		detector.Shell,
+		detector.PermissionInfo{},
+	)
+}
