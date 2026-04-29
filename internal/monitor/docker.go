@@ -45,8 +45,11 @@ func defaultDockerStrategy(osInfo detector.OSInfo) (*strategyWithCloser, error) 
 }
 
 type sdkDockerProvider struct {
-	cli           *client.Client
-	extractedDirs map[string]string // cache: container ID -> resolved host source dir
+	closeFn             func() error
+	containerListFn     func(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	containerInspectFn  func(ctx context.Context, containerID string) (container.InspectResponse, error)
+	copyFromContainerFn func(ctx context.Context, containerID, srcPath string) (io.ReadCloser, container.PathStat, error)
+	extractedDirs       map[string]string // cache: container ID -> resolved host source dir
 }
 
 type containerProjectDirExtractor func(ctx context.Context, containerID, containerProjectDir string) (string, error)
@@ -70,7 +73,13 @@ func newDockerProvider(osInfo detector.OSInfo) (*sdkDockerProvider, error) {
 		return nil, fmt.Errorf("docker daemon ping failed: %w", err)
 	}
 
-	return &sdkDockerProvider{cli: cli, extractedDirs: make(map[string]string)}, nil
+	return &sdkDockerProvider{
+		closeFn:             cli.Close,
+		containerListFn:     cli.ContainerList,
+		containerInspectFn:  cli.ContainerInspect,
+		copyFromContainerFn: cli.CopyFromContainer,
+		extractedDirs:       make(map[string]string),
+	}, nil
 }
 
 func dockerHostForOS(goos string) (string, error) {
@@ -90,11 +99,18 @@ func dockerHostForOS(goos string) (string, error) {
 }
 
 func (s *sdkDockerProvider) Close() error {
-	return s.cli.Close()
+	if s.closeFn == nil {
+		return nil
+	}
+	return s.closeFn()
 }
 
 func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discoveredJob, error) {
-	containers, err := s.cli.ContainerList(ctx, container.ListOptions{All: false})
+	if s.containerListFn == nil || s.containerInspectFn == nil {
+		return nil, fmt.Errorf("docker provider is not initialized")
+	}
+
+	containers, err := s.containerListFn(ctx, container.ListOptions{All: false})
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +128,7 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 
 	out := make([]discoveredJob, 0, len(containers))
 	for _, c := range containers {
-		inspect, err := s.cli.ContainerInspect(ctx, c.ID)
+		inspect, err := s.containerInspectFn(ctx, c.ID)
 		if err != nil {
 			continue
 		}
@@ -274,7 +290,11 @@ func (s *sdkDockerProvider) extractContainerProjectDir(ctx context.Context, cont
 		return "", fmt.Errorf("container project directory is empty")
 	}
 
-	r, _, err := s.cli.CopyFromContainer(ctx, containerID, projectDir)
+	if s.copyFromContainerFn == nil {
+		return "", fmt.Errorf("docker provider copy function is not initialized")
+	}
+
+	r, _, err := s.copyFromContainerFn(ctx, containerID, projectDir)
 	if err != nil {
 		return "", err
 	}

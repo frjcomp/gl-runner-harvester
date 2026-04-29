@@ -3,8 +3,11 @@ package scanner
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
+	titusscanner "github.com/praetorian-inc/titus/pkg/scanner"
 	"github.com/praetorian-inc/titus/pkg/types"
 )
 
@@ -183,4 +186,74 @@ func TestDedupeFindings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestScanUsesEnvAndDirectorySources(t *testing.T) {
+	oldCore := titusCore
+	oldNewValidationEngine := newValidationEngine
+	oldScanSourceFn := scanSourceFn
+	oldLogFindingFn := logFindingFn
+	defer func() {
+		titusCore = oldCore
+		newValidationEngine = oldNewValidationEngine
+		scanSourceFn = oldScanSourceFn
+		logFindingFn = oldLogFindingFn
+	}()
+
+	titusCore = &titusscanner.Core{}
+	newValidationEngine = func(string) validationEngine {
+		return fakeValidationEngine{}
+	}
+
+	logged := 0
+	logFindingFn = func(Finding) {
+		logged++
+	}
+
+	scanCalls := 0
+	scanSourceFn = func(content, source string, locationFn func(int) string, _ validationEngine) ([]Finding, error) {
+		scanCalls++
+		_ = content
+		return []Finding{{Type: "stub", Location: locationFn(1), Match: source}}, nil
+	}
+
+	tmp := t.TempDir()
+	filePath := filepath.Join(tmp, "sample.txt")
+	if err := os.WriteFile(filePath, []byte("token"), 0o600); err != nil {
+		t.Fatalf("write scan file: %v", err)
+	}
+
+	findings, err := Scan(map[string]string{"CI_JOB_TOKEN": "abc"}, tmp, "https://gitlab.com")
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("expected 2 findings (env + file), got %d", len(findings))
+	}
+	if scanCalls != 2 {
+		t.Fatalf("expected scanSource to be called twice, got %d", scanCalls)
+	}
+	if logged != 2 {
+		t.Fatalf("expected 2 logged findings, got %d", logged)
+	}
+}
+
+func TestScanSourceNoMatches(t *testing.T) {
+	if titusCore == nil {
+		t.Fatalf("expected titus core initialization")
+	}
+
+	findings, err := scanSource("plain text without secrets", "src", func(line int) string {
+		return "src:1"
+	}, fakeValidationEngine{})
+	if err != nil {
+		t.Fatalf("scanSource: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("expected no findings, got %d", len(findings))
+	}
+}
+
+func TestLogFindingNoVerification(t *testing.T) {
+	logFinding(Finding{Type: "rule", Location: "env:KEY", Match: "secret"})
 }

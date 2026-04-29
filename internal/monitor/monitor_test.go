@@ -436,3 +436,90 @@ func TestJobWebURL(t *testing.T) {
 		})
 	}
 }
+
+func TestReadProcEnvironAndCmdline(t *testing.T) {
+	oldRoot := procRoot
+	oldReadFile := procReadFile
+	defer func() {
+		procRoot = oldRoot
+		procReadFile = oldReadFile
+	}()
+
+	procRoot = t.TempDir()
+	procReadFile = os.ReadFile
+
+	pidDir := filepath.Join(procRoot, "4242")
+	if err := os.MkdirAll(pidDir, 0o700); err != nil {
+		t.Fatalf("mkdir pid dir: %v", err)
+	}
+
+	envRaw := []byte("CI_JOB_ID=123\x00CI_PROJECT_DIR=/builds/group/project\x00")
+	if err := os.WriteFile(filepath.Join(pidDir, "environ"), envRaw, 0o600); err != nil {
+		t.Fatalf("write environ: %v", err)
+	}
+	cmdRaw := []byte("/usr/bin/bash\x00-lc\x00run-job\x00")
+	if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), cmdRaw, 0o600); err != nil {
+		t.Fatalf("write cmdline: %v", err)
+	}
+
+	env, err := readProcEnviron(4242)
+	if err != nil {
+		t.Fatalf("readProcEnviron: %v", err)
+	}
+	if env["CI_JOB_ID"] != "123" {
+		t.Fatalf("expected CI_JOB_ID=123, got %q", env["CI_JOB_ID"])
+	}
+
+	cmdline, err := readProcCmdline(4242)
+	if err != nil {
+		t.Fatalf("readProcCmdline: %v", err)
+	}
+	if cmdline != "/usr/bin/bash -lc run-job" {
+		t.Fatalf("unexpected cmdline: %q", cmdline)
+	}
+}
+
+func TestListLinuxProcessJobsFromFakeProc(t *testing.T) {
+	oldRoot := procRoot
+	oldReadDir := procReadDir
+	oldReadFile := procReadFile
+	defer func() {
+		procRoot = oldRoot
+		procReadDir = oldReadDir
+		procReadFile = oldReadFile
+	}()
+
+	procRoot = t.TempDir()
+	procReadDir = os.ReadDir
+	procReadFile = os.ReadFile
+
+	makeProc := func(pid string, envRaw, cmdRaw []byte) {
+		pidDir := filepath.Join(procRoot, pid)
+		if err := os.MkdirAll(pidDir, 0o700); err != nil {
+			t.Fatalf("mkdir pid dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pidDir, "environ"), envRaw, 0o600); err != nil {
+			t.Fatalf("write environ: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(pidDir, "cmdline"), cmdRaw, 0o600); err != nil {
+			t.Fatalf("write cmdline: %v", err)
+		}
+	}
+
+	makeProc("1001", []byte("CI_JOB_ID=2001\x00CI_PROJECT_DIR=/builds/p\x00"), []byte("bash\x00-lc\x00run\x00"))
+	makeProc("1002", []byte("PATH=/usr/bin\x00"), []byte("sleep\x001\x00"))
+
+	jobs, err := listLinuxProcessJobs()
+	if err != nil {
+		t.Fatalf("listLinuxProcessJobs: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one CI job, got %d", len(jobs))
+	}
+	if jobs[0].JobID != "2001" {
+		t.Fatalf("unexpected job id: %q", jobs[0].JobID)
+	}
+	if jobs[0].Cmdline != "bash -lc run" {
+		t.Fatalf("unexpected cmdline: %q", jobs[0].Cmdline)
+	}
+}

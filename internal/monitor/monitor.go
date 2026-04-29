@@ -136,6 +136,9 @@ type dockerStrategyFactoryFunc func(osInfo detector.OSInfo) (*strategyWithCloser
 
 var newDockerStrategy dockerStrategyFactoryFunc = defaultDockerStrategy
 var notifyContext = signal.NotifyContext
+var procRoot = "/proc"
+var procReadDir = os.ReadDir
+var procReadFile = os.ReadFile
 
 // New creates a new Monitor instance.
 func New(osInfo detector.OSInfo, execType detector.ExecutorType, intervalSecs int, h jobHarvester) *Monitor {
@@ -342,7 +345,7 @@ func contains(s []string, v string) bool {
 }
 
 func listLinuxProcessJobs() ([]processJob, error) {
-	procEntries, err := os.ReadDir("/proc")
+	procEntries, err := procReadDir(procRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -385,8 +388,8 @@ func listLinuxProcessJobs() ([]processJob, error) {
 }
 
 func readProcEnviron(pid int) (map[string]string, error) {
-	path := filepath.Join("/proc", strconv.Itoa(pid), "environ")
-	data, err := os.ReadFile(path)
+	path := filepath.Join(procRoot, strconv.Itoa(pid), "environ")
+	data, err := procReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -408,8 +411,8 @@ func readProcEnviron(pid int) (map[string]string, error) {
 }
 
 func readProcCmdline(pid int) (string, error) {
-	path := filepath.Join("/proc", strconv.Itoa(pid), "cmdline")
-	data, err := os.ReadFile(path)
+	path := filepath.Join(procRoot, strconv.Itoa(pid), "cmdline")
+	data, err := procReadFile(path)
 	if err != nil {
 		return "", err
 	}

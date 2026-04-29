@@ -25,6 +25,17 @@ type Finding struct {
 
 var titusCore *scanner.Core
 
+var (
+	newValidationEngine = func(gitlabURL string) validationEngine {
+		gitlabURLs := gitlab.ConfiguredURLs(gitlabURL)
+		return validator.NewEngine(4, gitlab.NewValidator(gitlabURLs))
+	}
+	scanSourceFn = scanSource
+	walkDirFn    = filepath.WalkDir
+	readFileFn   = os.ReadFile
+	logFindingFn = logFinding
+)
+
 type validationEngine interface {
 	CanValidate(ruleID string) bool
 	ValidateMatch(ctx context.Context, match *types.Match) (*types.ValidationResult, error)
@@ -58,15 +69,14 @@ func Scan(envVars map[string]string, scanDir, gitlabURL string) ([]Finding, erro
 		return nil, fmt.Errorf("titus scanner not initialized")
 	}
 
-	gitlabURLs := gitlab.ConfiguredURLs(gitlabURL)
-	validationEngine := validator.NewEngine(4, gitlab.NewValidator(gitlabURLs))
+	validationEngine := newValidationEngine(gitlabURL)
 
 	var findings []Finding
 
 	// Scan environment variables
 	for k, v := range envVars {
 		source := "env:" + k
-		envFindings, err := scanSource(k+"="+v, source, func(_ int) string { return source }, validationEngine)
+		envFindings, err := scanSourceFn(k+"="+v, source, func(_ int) string { return source }, validationEngine)
 		if err != nil {
 			log.Debug().Err(err).Str("env_var", k).Msg("error scanning environment variable")
 			continue
@@ -76,7 +86,7 @@ func Scan(envVars map[string]string, scanDir, gitlabURL string) ([]Finding, erro
 
 	// Scan directory
 	if scanDir != "" {
-		_ = filepath.WalkDir(scanDir, func(path string, d fs.DirEntry, err error) error {
+		_ = walkDirFn(scanDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d == nil || d.IsDir() {
 				return nil
 			}
@@ -86,12 +96,12 @@ func Scan(envVars map[string]string, scanDir, gitlabURL string) ([]Finding, erro
 				return nil
 			}
 
-			content, err := os.ReadFile(path)
+			content, err := readFileFn(path)
 			if err != nil {
 				return nil
 			}
 
-			fileFindings, err := scanSource(string(content), path, func(line int) string {
+			fileFindings, err := scanSourceFn(string(content), path, func(line int) string {
 				return fmt.Sprintf("%s:%d", path, line)
 			}, validationEngine)
 			if err != nil {
@@ -106,7 +116,7 @@ func Scan(envVars map[string]string, scanDir, gitlabURL string) ([]Finding, erro
 
 	deduped := dedupeFindings(findings)
 	for _, finding := range deduped {
-		logFinding(finding)
+		logFindingFn(finding)
 	}
 
 	return deduped, nil

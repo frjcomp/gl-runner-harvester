@@ -130,3 +130,100 @@ func TestNormalizeExecutor(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectExecutorFromArtifactsDocker(t *testing.T) {
+	oldFileExists := detectorFileExists
+	oldDirExists := detectorDirExists
+	oldCgroupContains := detectorCgroupContains
+	oldUserHomeDir := detectorUserHomeDir
+	defer func() {
+		detectorFileExists = oldFileExists
+		detectorDirExists = oldDirExists
+		detectorCgroupContains = oldCgroupContains
+		detectorUserHomeDir = oldUserHomeDir
+	}()
+
+	detectorFileExists = func(path string) bool {
+		return path == "/.dockerenv"
+	}
+	detectorDirExists = func(path string) bool {
+		return path == "/builds"
+	}
+	detectorCgroupContains = func(marker string) bool {
+		return marker == "docker"
+	}
+	detectorUserHomeDir = func() (string, error) {
+		return "/home/tester", nil
+	}
+
+	execType, meta := detectExecutorFromArtifacts(map[string]string{})
+	if execType != Docker {
+		t.Fatalf("expected docker executor, got %s", execType)
+	}
+	if meta["reason"] != "docker_artifacts_detected" {
+		t.Fatalf("unexpected reason: %q", meta["reason"])
+	}
+	if meta["confidence"] != "high" {
+		t.Fatalf("expected high confidence, got %q", meta["confidence"])
+	}
+}
+
+func TestDetectExecutorFromArtifactsKubernetes(t *testing.T) {
+	oldFileExists := detectorFileExists
+	oldDirExists := detectorDirExists
+	oldCgroupContains := detectorCgroupContains
+	oldUserHomeDir := detectorUserHomeDir
+	defer func() {
+		detectorFileExists = oldFileExists
+		detectorDirExists = oldDirExists
+		detectorCgroupContains = oldCgroupContains
+		detectorUserHomeDir = oldUserHomeDir
+	}()
+
+	detectorFileExists = func(path string) bool {
+		return strings.Contains(path, "serviceaccount")
+	}
+	detectorDirExists = func(string) bool { return false }
+	detectorCgroupContains = func(marker string) bool {
+		return marker == "kubepods"
+	}
+	detectorUserHomeDir = func() (string, error) {
+		return "/home/tester", nil
+	}
+
+	execType, meta := detectExecutorFromArtifacts(map[string]string{})
+	if execType != Kubernetes {
+		t.Fatalf("expected kubernetes executor, got %s", execType)
+	}
+	if meta["reason"] != "kubernetes_artifacts_detected" {
+		t.Fatalf("unexpected reason: %q", meta["reason"])
+	}
+}
+
+func TestDetectExecutorFromArtifactsUnknown(t *testing.T) {
+	oldFileExists := detectorFileExists
+	oldDirExists := detectorDirExists
+	oldCgroupContains := detectorCgroupContains
+	oldUserHomeDir := detectorUserHomeDir
+	defer func() {
+		detectorFileExists = oldFileExists
+		detectorDirExists = oldDirExists
+		detectorCgroupContains = oldCgroupContains
+		detectorUserHomeDir = oldUserHomeDir
+	}()
+
+	detectorFileExists = func(string) bool { return false }
+	detectorDirExists = func(string) bool { return false }
+	detectorCgroupContains = func(string) bool { return false }
+	detectorUserHomeDir = func() (string, error) {
+		return "/home/tester", nil
+	}
+
+	execType, meta := detectExecutorFromArtifacts(map[string]string{})
+	if execType != Unknown {
+		t.Fatalf("expected unknown executor, got %s", execType)
+	}
+	if meta["reason"] != "insufficient_disk_markers" {
+		t.Fatalf("unexpected reason: %q", meta["reason"])
+	}
+}

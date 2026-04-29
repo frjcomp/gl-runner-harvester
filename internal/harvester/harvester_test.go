@@ -3,6 +3,7 @@ package harvester
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -253,5 +254,56 @@ func TestNewUsesDefaultMaxDiskUsagePercentForInvalidConfig(t *testing.T) {
 	h := New(Config{OutputDir: t.TempDir(), MaxDiskUsagePercent: 0})
 	if h.maxDiskUsage != defaultMaxDiskUsagePercent {
 		t.Fatalf("expected default max disk usage %.2f, got %.2f", defaultMaxDiskUsagePercent, h.maxDiskUsage)
+	}
+}
+
+func TestShouldWarnImageHarvestError(t *testing.T) {
+	t.Run("daemon access error uses debug level", func(t *testing.T) {
+		err := &dockerDaemonAccessError{err: errors.New("permission denied while trying to connect to docker daemon")}
+		if shouldWarnImageHarvestError(err) {
+			t.Fatalf("expected daemon access errors to skip warning level")
+		}
+	})
+
+	t.Run("non-daemon errors stay warning", func(t *testing.T) {
+		err := errors.New("pull failed")
+		if !shouldWarnImageHarvestError(err) {
+			t.Fatalf("expected non-daemon errors to remain warning level")
+		}
+	})
+}
+
+func TestShouldWarnUnauthorizedAccessError(t *testing.T) {
+	t.Run("shell mode and 401 downgrades warning", func(t *testing.T) {
+		err := errors.New("list secure files: unexpected status 401 listing secure files")
+		if shouldWarnUnauthorizedAccessError(err, "shell-proc-linux") {
+			t.Fatalf("expected shell 401 errors to skip warning level")
+		}
+	})
+
+	t.Run("shell mode non-401 stays warning", func(t *testing.T) {
+		err := errors.New("list secure files: unexpected status 500")
+		if !shouldWarnUnauthorizedAccessError(err, "shell-proc-linux") {
+			t.Fatalf("expected shell non-401 errors to remain warning level")
+		}
+	})
+
+	t.Run("non-shell mode 401 stays warning", func(t *testing.T) {
+		err := errors.New("list registry repositories: unexpected status 401 listing repositories")
+		if !shouldWarnUnauthorizedAccessError(err, "docker-api") {
+			t.Fatalf("expected non-shell 401 errors to remain warning level")
+		}
+	})
+}
+
+func TestIsShellDiscoveryMode(t *testing.T) {
+	if !isShellDiscoveryMode("shell-proc-linux") {
+		t.Fatalf("expected shell-proc-linux to be shell mode")
+	}
+	if !isShellDiscoveryMode("shell") {
+		t.Fatalf("expected shell to be shell mode")
+	}
+	if isShellDiscoveryMode("docker-api") {
+		t.Fatalf("did not expect docker-api to be shell mode")
 	}
 }

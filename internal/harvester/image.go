@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,13 +20,39 @@ import (
 
 var imageArchiveUnsafeChars = regexp.MustCompile(`[^[:alnum:]._-]+`)
 
+type dockerDaemonAccessError struct {
+	err error
+}
+
+func (e *dockerDaemonAccessError) Error() string {
+	return e.err.Error()
+}
+
+func (e *dockerDaemonAccessError) Unwrap() error {
+	return e.err
+}
+
+type imageDockerClient interface {
+	ImagePull(ctx context.Context, ref string, options image.PullOptions) (io.ReadCloser, error)
+	ImageSave(ctx context.Context, refs []string, options ...client.ImageSaveOption) (io.ReadCloser, error)
+	ImageRemove(ctx context.Context, ref string, options image.RemoveOptions) ([]image.DeleteResponse, error)
+	Close() error
+}
+
+var newImageDockerClient = func() (imageDockerClient, error) {
+	return client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+}
+
 // HarvestImage authenticates to the GitLab container registry using
 // CI_JOB_TOKEN, pulls imageRef via the local Docker daemon, saves it using a
 // filesystem-safe archive name derived from the image tag inside destDir, and
 // removes the locally cached image afterwards.
 func HarvestImage(ctx context.Context, env map[string]string, imageRef, destDir string) error {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := newImageDockerClient()
 	if err != nil {
+		if looksLikeDockerDaemonAccessError(err) {
+			return fmt.Errorf("create docker client: %w", &dockerDaemonAccessError{err: err})
+		}
 		return fmt.Errorf("create docker client: %w", err)
 	}
 	defer cli.Close()
@@ -46,6 +73,9 @@ func HarvestImage(ctx context.Context, env map[string]string, imageRef, destDir 
 
 		pullResp, err := cli.ImagePull(ctx, imageRef, image.PullOptions{RegistryAuth: encodedAuth})
 		if err != nil {
+			if looksLikeDockerDaemonAccessError(err) {
+				return fmt.Errorf("pull image %q: %w", imageRef, &dockerDaemonAccessError{err: err})
+			}
 			return fmt.Errorf("pull image %q: %w", imageRef, err)
 		}
 		// Drain pull output so the daemon completes the pull.
@@ -59,6 +89,9 @@ func HarvestImage(ctx context.Context, env map[string]string, imageRef, destDir 
 		log.Warn().Str("image", imageRef).Msg("CI_REGISTRY or CI_JOB_TOKEN missing; skipping registry login, attempting pull with existing daemon credentials")
 		pullResp, err := cli.ImagePull(ctx, imageRef, image.PullOptions{})
 		if err != nil {
+			if looksLikeDockerDaemonAccessError(err) {
+				return fmt.Errorf("pull image %q: %w", imageRef, &dockerDaemonAccessError{err: err})
+			}
 			return fmt.Errorf("pull image %q: %w", imageRef, err)
 		}
 		if _, err := io.Copy(io.Discard, pullResp); err != nil {
@@ -74,6 +107,9 @@ func HarvestImage(ctx context.Context, env map[string]string, imageRef, destDir 
 
 	saveResp, err := cli.ImageSave(ctx, []string{imageRef})
 	if err != nil {
+		if looksLikeDockerDaemonAccessError(err) {
+			return fmt.Errorf("save image %q: %w", imageRef, &dockerDaemonAccessError{err: err})
+		}
 		return fmt.Errorf("save image %q: %w", imageRef, err)
 	}
 	defer saveResp.Close()
@@ -138,4 +174,37 @@ func imageTag(imageRef string) string {
 		return ""
 	}
 	return strings.TrimSpace(tail[colonIndex+1:])
+}
+
+func isDockerDaemonAccessError(err error) bool {
+	var daemonErr *dockerDaemonAccessError
+	return errors.As(err, &daemonErr)
+}
+
+func looksLikeDockerDaemonAccessError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	message := strings.ToLower(err.Error())
+	hasDockerDaemonSignal := strings.Contains(message, "docker daemon") || strings.Contains(message, "docker.sock")
+	hasConnectionSignal := strings.Contains(message, "permission denied") ||
+		strings.Contains(message, "connect: no such file or directory") ||
+		strings.Contains(message, "connect: connection refused") ||
+		strings.Contains(message, "cannot connect") ||
+		strings.Contains(message, "dial unix")
+
+	if hasDockerDaemonSignal && hasConnectionSignal {
+		return true
+	}
+
+	if strings.Contains(message, "unix:///var/run/docker.sock") && hasConnectionSignal {
+		return true
+	}
+
+	if strings.Contains(message, "open //./pipe/docker_engine") && strings.Contains(message, "access is denied") {
+		return true
+	}
+
+	return false
 }

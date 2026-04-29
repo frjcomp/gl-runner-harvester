@@ -71,7 +71,7 @@ func configureLogging(level, logPath string) error {
 
 func newLogWriter(logPath string) (io.Writer, error) {
 	if strings.TrimSpace(logPath) == "" {
-		return zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}, nil
+		return zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05"}, nil
 	}
 
 	cleanPath := filepath.Clean(logPath)

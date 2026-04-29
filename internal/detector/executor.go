@@ -27,6 +27,13 @@ type Config struct {
 	Runners []Runner `toml:"runners"`
 }
 
+var (
+	detectorFileExists     = fileExists
+	detectorDirExists      = dirExists
+	detectorCgroupContains = cgroupContains
+	detectorUserHomeDir    = os.UserHomeDir
+)
+
 // Runner represents a single runner configuration in the TOML.
 type Runner struct {
 	Name     string `toml:"name"`
@@ -196,12 +203,12 @@ func kubernetesArtifacts() ([]string, string) {
 		"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
 		"/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
 	} {
-		if fileExists(path) {
+		if detectorFileExists(path) {
 			artifacts = append(artifacts, path)
 		}
 	}
 
-	if cgroupContains("kubepods") {
+	if detectorCgroupContains("kubepods") {
 		artifacts = append(artifacts, "/proc/1/cgroup:kubepods")
 	}
 
@@ -215,13 +222,13 @@ func kubernetesArtifacts() ([]string, string) {
 
 func dockerArtifacts() ([]string, string) {
 	artifacts := make([]string, 0, 3)
-	if fileExists("/.dockerenv") {
+	if detectorFileExists("/.dockerenv") {
 		artifacts = append(artifacts, "/.dockerenv")
 	}
-	if dirExists("/builds") {
+	if detectorDirExists("/builds") {
 		artifacts = append(artifacts, "/builds")
 	}
-	if cgroupContains("docker") || cgroupContains("containerd") {
+	if detectorCgroupContains("docker") || detectorCgroupContains("containerd") {
 		artifacts = append(artifacts, "/proc/1/cgroup:container")
 	}
 
@@ -243,19 +250,19 @@ func shellArtifacts() ([]string, string) {
 		"/usr/local/bin/gitlab-runner",
 	} {
 		if path == "/etc/gitlab-runner" || strings.HasSuffix(path, "/builds") {
-			if dirExists(path) {
+			if detectorDirExists(path) {
 				artifacts = append(artifacts, path)
 			}
 			continue
 		}
-		if fileExists(path) {
+		if detectorFileExists(path) {
 			artifacts = append(artifacts, path)
 		}
 	}
 
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := detectorUserHomeDir(); err == nil {
 		userConfig := filepath.Join(home, ".gitlab-runner", "config.toml")
-		if fileExists(userConfig) {
+		if detectorFileExists(userConfig) {
 			artifacts = append(artifacts, userConfig)
 		}
 	}

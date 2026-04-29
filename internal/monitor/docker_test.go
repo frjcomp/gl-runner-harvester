@@ -4,10 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 )
 
@@ -323,5 +326,97 @@ func TestSdkDockerProviderPrunesStaleCache(t *testing.T) {
 	}
 	if _, ok := provider.extractedDirs["cid-1"]; !ok {
 		t.Fatalf("expected cid-1 to remain in extractedDirs")
+	}
+}
+
+func TestSdkDockerProviderListRunningContainers(t *testing.T) {
+	provider := &sdkDockerProvider{
+		extractedDirs: map[string]string{"stale": "/tmp/old"},
+		containerListFn: func(context.Context, container.ListOptions) ([]container.Summary, error) {
+			return []container.Summary{{ID: "cid-1"}}, nil
+		},
+		containerInspectFn: func(context.Context, string) (container.InspectResponse, error) {
+			return container.InspectResponse{
+				ContainerJSONBase: &types.ContainerJSONBase{},
+				Config: &container.Config{
+					Env:        []string{"CI_JOB_ID=123", "CI_PROJECT_DIR=/builds/group/project"},
+					Entrypoint: []string{"/usr/bin/dumb-init"},
+					Cmd:        []string{"/entrypoint", "gitlab-runner-build"},
+				},
+				Mounts: []container.MountPoint{{Destination: "/builds", Source: "/host/builds", Type: "bind"}},
+			}, nil
+		},
+	}
+
+	jobs, err := provider.ListRunningContainers(context.Background())
+	if err != nil {
+		t.Fatalf("ListRunningContainers: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job, got %d", len(jobs))
+	}
+	if jobs[0].JobID != "123" {
+		t.Fatalf("unexpected job id: %q", jobs[0].JobID)
+	}
+	if jobs[0].SourceDir != filepath.Join("/host/builds", "group", "project") {
+		t.Fatalf("unexpected source dir: %q", jobs[0].SourceDir)
+	}
+	if _, ok := provider.extractedDirs["stale"]; ok {
+		t.Fatalf("expected stale cache entry to be pruned")
+	}
+}
+
+func TestSdkDockerProviderListRunningContainersNotInitialized(t *testing.T) {
+	provider := &sdkDockerProvider{}
+	_, err := provider.ListRunningContainers(context.Background())
+	if err == nil {
+		t.Fatalf("expected initialization error")
+	}
+}
+
+func TestExtractContainerProjectDir(t *testing.T) {
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "project", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatalf("write dir header: %v", err)
+	}
+	content := []byte("hello")
+	if err := tw.WriteHeader(&tar.Header{Name: "project/README.md", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatalf("write file header: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("write content: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	provider := &sdkDockerProvider{
+		copyFromContainerFn: func(context.Context, string, string) (io.ReadCloser, container.PathStat, error) {
+			return io.NopCloser(bytes.NewReader(buf.Bytes())), container.PathStat{}, nil
+		},
+	}
+
+	out, err := provider.extractContainerProjectDir(context.Background(), "cid-1", "/builds/group/project")
+	if err != nil {
+		t.Fatalf("extractContainerProjectDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "README.md")); err != nil {
+		t.Fatalf("expected extracted file: %v", err)
+	}
+	_ = os.RemoveAll(filepath.Dir(out))
+}
+
+func TestExtractContainerProjectDirErrors(t *testing.T) {
+	provider := &sdkDockerProvider{}
+	if _, err := provider.extractContainerProjectDir(context.Background(), "cid", ""); err == nil {
+		t.Fatalf("expected error for empty project dir")
+	}
+
+	provider.copyFromContainerFn = func(context.Context, string, string) (io.ReadCloser, container.PathStat, error) {
+		return nil, container.PathStat{}, errors.New("copy failed")
+	}
+	if _, err := provider.extractContainerProjectDir(context.Background(), "cid", "/builds/group/project"); err == nil {
+		t.Fatalf("expected copy error")
 	}
 }

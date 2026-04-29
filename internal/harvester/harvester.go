@@ -173,7 +173,11 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 			if h.allowDiskWrite(jobID, "secure-files") {
 				sfDir := filepath.Join(destRoot, "secure_files")
 				if err := h.secFilesClient.FetchAll(ctx, token, projectID, sfDir); err != nil {
-					log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
+					if shouldWarnUnauthorizedAccessError(err, envVars["GL_HARVEST_DISCOVERY_MODE"]) {
+						log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
+					} else {
+						log.Debug().Err(err).Str("job_id", jobID).Msg("Secure files unavailable for shell runner (401); skipping")
+					}
 				} else {
 					log.Info().Str("job_id", jobID).Str("dest", sfDir).Msg("Secure files fetched")
 				}
@@ -194,11 +198,19 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 			if h.allowDiskWrite(jobID, "image-harvest") {
 				imageRef, err := h.registryClient.LatestImageRef(ctx, token, projectID, ciRegistry)
 				if err != nil {
-					log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
+					if shouldWarnUnauthorizedAccessError(err, envVars["GL_HARVEST_DISCOVERY_MODE"]) {
+						log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
+					} else {
+						log.Debug().Err(err).Str("job_id", jobID).Msg("Registry image lookup unavailable for shell runner (401); skipping")
+					}
 				} else if imageRef != "" {
 					imgDir := filepath.Join(destRoot, "image")
 					if err := h.imageHarvester(ctx, envVars, imageRef, imgDir); err != nil {
-						log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
+						if shouldWarnImageHarvestError(err) {
+							log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
+						} else {
+							log.Debug().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest skipped: Docker daemon access unavailable")
+						}
 					}
 				} else {
 					log.Info().Str("job_id", jobID).Msg("No registry images found for project")
@@ -258,6 +270,35 @@ func (h *Harvester) allowDiskWrite(jobID, stage string) bool {
 
 func deriveJobID(jobDir string) string {
 	return filepath.Base(jobDir)
+}
+
+func shouldWarnImageHarvestError(err error) bool {
+	return !isDockerDaemonAccessError(err)
+}
+
+func shouldWarnUnauthorizedAccessError(err error, discoveryMode string) bool {
+	if !isShellDiscoveryMode(discoveryMode) {
+		return true
+	}
+	return !looksLikeUnauthorizedHTTPError(err)
+}
+
+func isShellDiscoveryMode(mode string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized == "shell" || strings.HasPrefix(normalized, "shell-") {
+		return true
+	}
+	return false
+}
+
+func looksLikeUnauthorizedHTTPError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unexpected status 401") ||
+		strings.Contains(message, " status 401 ") ||
+		strings.HasSuffix(message, " status 401")
 }
 
 func collectEnvVars() map[string]string {
