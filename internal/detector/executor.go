@@ -55,7 +55,7 @@ func DetectExecutor(configPath string) (ExecutorType, map[string]string) {
 			if len(denied) > 0 {
 				meta["config_reason"] = "runner_config_permission_denied"
 				meta["permission_denied_paths"] = strings.Join(denied, ",")
-				log.Warn().
+				log.Debug().
 					Strs("permission_denied_paths", denied).
 					Msg("GitLab runner config.toml exists but is not readable due to permissions; attempting disk artifact executor detection")
 				return detectExecutorFromArtifacts(meta)
@@ -63,7 +63,7 @@ func DetectExecutor(configPath string) (ExecutorType, map[string]string) {
 
 			meta["config_reason"] = "runner_config_not_found"
 			meta["searched_paths"] = strings.Join(searched, ",")
-			log.Warn().
+			log.Debug().
 				Strs("searched_paths", searched).
 				Msg("GitLab runner config.toml not found; attempting disk artifact executor detection")
 			return detectExecutorFromArtifacts(meta)
@@ -77,7 +77,7 @@ func DetectExecutor(configPath string) (ExecutorType, map[string]string) {
 		} else if err != nil && errors.Is(err, os.ErrPermission) {
 			meta["config_reason"] = "runner_config_permission_denied"
 			meta["config_path"] = configPath
-			log.Warn().
+			log.Debug().
 				Str("config", configPath).
 				Msg("GitLab runner config.toml is not readable due to permissions; attempting disk artifact executor detection")
 			return detectExecutorFromArtifacts(meta)
@@ -101,6 +101,10 @@ func parseConfigToml(configPath string, meta map[string]string) (ExecutorType, b
 		log.Debug().Err(err).Str("config", configPath).Msg("Failed to read config file")
 		return Unknown, false, err
 	}
+
+	log.Warn().
+		Str("config", configPath).
+		Msg("GitLab runner config.toml is readable by current user; this is usually unexpected")
 
 	var config Config
 	if err := toml.Unmarshal(data, &config); err != nil {
