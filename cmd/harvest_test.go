@@ -7,6 +7,30 @@ import (
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
 )
 
+func TestHarvestFlagShorthandsPresent(t *testing.T) {
+	tests := map[string]string{
+		"collection-path":        "c",
+		"executor":               "e",
+		"interval":               "i",
+		"max-disk-usage-percent": "m",
+		"scan":                   "s",
+		"no-harvest-files":       "f",
+		"gitlab-url":             "g",
+		"no-secure-files":        "S",
+		"no-harvest-images":      "I",
+	}
+
+	for name, want := range tests {
+		flag := harvestCmd.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("expected flag %q to exist", name)
+		}
+		if flag.Shorthand != want {
+			t.Fatalf("expected shorthand %q for flag %q, got %q", want, name, flag.Shorthand)
+		}
+	}
+}
+
 func TestNormalizeGitLabURL(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -119,7 +119,7 @@ func shouldDefaultToHarvest(args []string) bool {
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (trace, debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVarP(&logLevel, "log-level", "L", "info", "Log level (trace, debug, info, warn, error)")
 	rootCmd.PersistentFlags().StringVarP(&logFile, "log", "l", "", "Write logs to a file")
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(harvestCmd)

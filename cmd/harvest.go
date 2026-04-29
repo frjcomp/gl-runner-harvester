@@ -14,7 +14,6 @@ import (
 
 var (
 	collectionPath  string
-	runnerConfig    string
 	executor        string
 	interval        int
 	maxDiskUsagePct float64
@@ -34,16 +33,15 @@ copies source code when enabled, and optionally scans for secrets.`,
 }
 
 func init() {
-	harvestCmd.Flags().StringVar(&collectionPath, "collection-path", "/tmp/gl-harvest", "Directory to store harvested data")
-	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
-	harvestCmd.Flags().StringVar(&executor, "executor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
-	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
-	harvestCmd.Flags().Float64Var(&maxDiskUsagePct, "max-disk-usage-percent", 95, "Stop writing harvested artifacts when filesystem usage is at or above this percent")
-	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
-	harvestCmd.Flags().BoolVar(&noHarvestFiles, "no-harvest-files", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
-	harvestCmd.Flags().StringVar(&gitlabURL, "gitlab-url", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
-	harvestCmd.Flags().BoolVar(&noSecureFiles, "no-secure-files", false, "Disable fetching GitLab secure files using CI_JOB_TOKEN")
-	harvestCmd.Flags().BoolVar(&noHarvestImages, "no-harvest-images", false, "Disable pulling and saving the latest project registry image")
+	harvestCmd.Flags().StringVarP(&collectionPath, "collection-path", "c", "/tmp/gl-harvest", "Directory to store harvested data")
+	harvestCmd.Flags().StringVarP(&executor, "executor", "e", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
+	harvestCmd.Flags().IntVarP(&interval, "interval", "i", 5, "Polling interval in seconds")
+	harvestCmd.Flags().Float64VarP(&maxDiskUsagePct, "max-disk-usage-percent", "m", 95, "Stop writing harvested artifacts when filesystem usage is at or above this percent")
+	harvestCmd.Flags().BoolVarP(&scanSecrets, "scan", "s", true, "Enable secret scanning on harvested data")
+	harvestCmd.Flags().BoolVarP(&noHarvestFiles, "no-harvest-files", "f", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
+	harvestCmd.Flags().StringVarP(&gitlabURL, "gitlab-url", "g", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
+	harvestCmd.Flags().BoolVarP(&noSecureFiles, "no-secure-files", "S", false, "Disable fetching GitLab secure files using CI_JOB_TOKEN")
+	harvestCmd.Flags().BoolVarP(&noHarvestImages, "no-harvest-images", "I", false, "Disable pulling and saving the latest project registry image")
 }
 
 func runHarvest(cmd *cobra.Command, args []string) error {
@@ -61,7 +59,7 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 		Msg("Detected OS info")
 
 	// 2. Detect executor type
-	execType, execMeta := detector.DetectExecutor(runnerConfig)
+	execType, execMeta := detector.DetectExecutor("")
 	if executor != "" {
 		manualExecType, err := parseManualExecutor(executor)
 		if err != nil {

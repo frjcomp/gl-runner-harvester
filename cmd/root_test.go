@@ -57,6 +57,23 @@ func TestConfigureLoggingWritesPlainTextFile(t *testing.T) {
 	}
 }
 
+func TestRootPersistentFlagShorthandsPresent(t *testing.T) {
+	tests := map[string]string{
+		"log-level": "L",
+		"log":       "l",
+	}
+
+	for name, want := range tests {
+		flag := rootCmd.PersistentFlags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("expected persistent flag %q to exist", name)
+		}
+		if flag.Shorthand != want {
+			t.Fatalf("expected shorthand %q for flag %q, got %q", want, name, flag.Shorthand)
+		}
+	}
+}
+
 func TestShouldDefaultToHarvest(t *testing.T) {
 	tests := []struct {
 		name string
