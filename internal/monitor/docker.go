@@ -142,7 +142,7 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 			if extractErr != nil {
 				log.Debug().Err(extractErr).Str("container_id", c.ID).Str("container_project_dir", containerProjectDir).Msg("Docker project dir extraction fallback failed")
 			} else if extracted {
-				log.Info().Str("container_id", c.ID).Str("source_dir", sourceDir).Msg("Docker project dir extraction fallback succeeded")
+				log.Debug().Str("container_id", c.ID).Str("source_dir", sourceDir).Msg("Docker project dir extraction fallback succeeded")
 				s.extractedDirs[c.ID] = sourceDir
 			}
 		}

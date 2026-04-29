@@ -19,6 +19,12 @@ Run the harvester on a runner host to collect all active job artifacts:
 ./gl-runner-harvester harvest --collection-path /tmp/gl-harvest --interval 2 --log-level info
 ```
 
+To prevent disk exhaustion during long harvest runs, tune the write cutoff threshold (default is `95`):
+
+```bash
+./gl-runner-harvester harvest --max-disk-usage-percent 90
+```
+
 This will:
 1. Detect the runner executor type
 2. Poll for active CI/CD jobs every 2 seconds

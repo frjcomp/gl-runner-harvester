@@ -383,3 +383,56 @@ func TestCILookupCaseInsensitive(t *testing.T) {
 		t.Fatalf("expected empty when key is missing, got %q", got)
 	}
 }
+
+func TestJobWebURL(t *testing.T) {
+	tests := []struct {
+		name  string
+		env   map[string]string
+		jobID string
+		want  string
+	}{
+		{
+			name: "uses CI_JOB_URL directly",
+			env: map[string]string{
+				"CI_JOB_URL": "https://gitlab.example.com/group/project/-/jobs/123",
+			},
+			jobID: "123",
+			want:  "https://gitlab.example.com/group/project/-/jobs/123",
+		},
+		{
+			name: "builds URL from server project and env job id",
+			env: map[string]string{
+				"CI_SERVER_URL":   "https://gitlab.example.com/",
+				"CI_PROJECT_PATH": "group/project",
+				"CI_JOB_ID":       "456",
+			},
+			jobID: "ignored",
+			want:  "https://gitlab.example.com/group/project/-/jobs/456",
+		},
+		{
+			name: "falls back to discovered job id",
+			env: map[string]string{
+				"CI_SERVER_URL":   "https://gitlab.example.com",
+				"CI_PROJECT_PATH": "group/project",
+			},
+			jobID: "789",
+			want:  "https://gitlab.example.com/group/project/-/jobs/789",
+		},
+		{
+			name: "returns empty when missing metadata",
+			env: map[string]string{
+				"CI_SERVER_URL": "https://gitlab.example.com",
+			},
+			jobID: "789",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := jobWebURL(tt.env, tt.jobID); got != tt.want {
+				t.Fatalf("jobWebURL() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

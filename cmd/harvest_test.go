@@ -85,3 +85,43 @@ func TestPrintDetectionSummaryNoPanic(t *testing.T) {
 		detector.PermissionInfo{},
 	)
 }
+
+func TestValidateMaxDiskUsagePercent(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   float64
+		wantErr bool
+	}{
+		{name: "valid default", value: 95, wantErr: false},
+		{name: "valid decimal", value: 80.5, wantErr: false},
+		{name: "invalid zero", value: 0, wantErr: true},
+		{name: "invalid negative", value: -1, wantErr: true},
+		{name: "invalid hundred", value: 100, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMaxDiskUsagePercent(tc.value)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for value %.2f", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for value %.2f: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+func TestRunHarvestInvalidMaxDiskUsagePercent(t *testing.T) {
+	oldValue := maxDiskUsagePct
+	defer func() { maxDiskUsagePct = oldValue }()
+
+	maxDiskUsagePct = 100
+	err := runHarvest(nil, nil)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid --max-disk-usage-percent") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

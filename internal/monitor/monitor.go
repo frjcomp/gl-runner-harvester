@@ -247,16 +247,40 @@ func (m *Monitor) dispatchHarvest(ctx context.Context, job discoveredJob) {
 			return
 		}
 
-		log.Info().Str("job_id", job.JobID).Str("cmdline", job.Cmdline).Str("mode", job.DiscoveryMode).Msg("New job execution detected")
 		env := job.Env
 		if env == nil {
 			env = map[string]string{}
+		}
+		if jobURL := jobWebURL(env, job.JobID); strings.TrimSpace(jobURL) != "" {
+			log.Info().Str("job_id", job.JobID).Str("cmdline", job.Cmdline).Str("mode", job.DiscoveryMode).Str("job_url", jobURL).Msg("New job execution detected")
+		} else {
+			log.Info().Str("job_id", job.JobID).Str("cmdline", job.Cmdline).Str("mode", job.DiscoveryMode).Msg("New job execution detected")
 		}
 		env["GL_HARVEST_DISCOVERY_MODE"] = job.DiscoveryMode
 		if err := m.h.HarvestProcess(ctx, job.JobID, env, job.Cmdline); err != nil {
 			log.Error().Err(err).Str("job_id", job.JobID).Msg("Harvest failed")
 		}
 	}()
+}
+
+func jobWebURL(env map[string]string, jobID string) string {
+	if direct := strings.TrimSpace(ciLookup(env, "CI_JOB_URL")); direct != "" {
+		return direct
+	}
+
+	serverURL := strings.TrimRight(strings.TrimSpace(ciLookup(env, "CI_SERVER_URL")), "/")
+	projectPath := strings.Trim(strings.TrimSpace(ciLookup(env, "CI_PROJECT_PATH")), "/")
+
+	resolvedJobID := strings.TrimSpace(ciLookup(env, "CI_JOB_ID"))
+	if resolvedJobID == "" {
+		resolvedJobID = strings.TrimSpace(jobID)
+	}
+
+	if serverURL == "" || projectPath == "" || resolvedJobID == "" {
+		return ""
+	}
+
+	return serverURL + "/" + projectPath + "/-/jobs/" + resolvedJobID
 }
 
 func (m *Monitor) waitForHarvests() {

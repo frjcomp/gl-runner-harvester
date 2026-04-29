@@ -17,6 +17,7 @@ var (
 	runnerConfig    string
 	executor        string
 	interval        int
+	maxDiskUsagePct float64
 	scanSecrets     bool
 	gitlabURL       string
 	noHarvestFiles  bool
@@ -37,6 +38,7 @@ func init() {
 	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
 	harvestCmd.Flags().StringVar(&executor, "executor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
 	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
+	harvestCmd.Flags().Float64Var(&maxDiskUsagePct, "max-disk-usage-percent", 95, "Stop writing harvested artifacts when filesystem usage is at or above this percent")
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
 	harvestCmd.Flags().BoolVar(&noHarvestFiles, "no-harvest-files", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
 	harvestCmd.Flags().StringVar(&gitlabURL, "gitlab-url", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
@@ -46,6 +48,9 @@ func init() {
 
 func runHarvest(cmd *cobra.Command, args []string) error {
 	log.Info().Str("version", version).Msg("Starting gl-runner-harvester")
+	if err := validateMaxDiskUsagePercent(maxDiskUsagePct); err != nil {
+		return err
+	}
 
 	// 1. Detect OS info
 	osInfo := detector.DetectOS()
@@ -96,18 +101,26 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 
 	// 5. Create harvester
 	h := harvester.New(harvester.Config{
-		OutputDir:     collectPath,
-		ScanSecrets:   scanSecrets,
-		GitLabURL:     normalizedGitLabURL,
-		HarvestFiles:  !noHarvestFiles,
-		SecureFiles:   !noSecureFiles,
-		HarvestImages: !noHarvestImages,
+		OutputDir:           collectPath,
+		ScanSecrets:         scanSecrets,
+		GitLabURL:           normalizedGitLabURL,
+		HarvestFiles:        !noHarvestFiles,
+		SecureFiles:         !noSecureFiles,
+		HarvestImages:       !noHarvestImages,
+		MaxDiskUsagePercent: maxDiskUsagePct,
 	})
 
 	// 6. Start monitoring loop
 	m := monitor.New(osInfo, execType, interval, h)
 	log.Info().Int("interval_seconds", interval).Str("collection_path", collectPath).Bool("harvest_files", !noHarvestFiles).Msg("Starting monitor")
 	return m.Start()
+}
+
+func validateMaxDiskUsagePercent(v float64) error {
+	if v <= 0 || v >= 100 {
+		return fmt.Errorf("invalid --max-disk-usage-percent value %.2f (must be greater than 0 and less than 100)", v)
+	}
+	return nil
 }
 
 func normalizeGitLabURL(raw string) (string, error) {

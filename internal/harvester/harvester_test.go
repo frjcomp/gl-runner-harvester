@@ -220,3 +220,38 @@ func TestHarvestProcessPassesContextToImageHarvest(t *testing.T) {
 		t.Fatalf("expected image harvester to be called")
 	}
 }
+
+func TestHarvestProcessSkipsWritesWhenDiskThresholdReachedAtStart(t *testing.T) {
+	out := t.TempDir()
+	src := t.TempDir()
+	if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	h := New(Config{OutputDir: out, ScanSecrets: false, HarvestFiles: true, MaxDiskUsagePercent: 95})
+	h.diskUsageFn = func(path string) (float64, error) {
+		return 95, nil
+	}
+
+	env := map[string]string{
+		"CI_PROJECT_DIR": src,
+	}
+	if err := h.HarvestProcess(context.Background(), "555", env, "bash -lc run"); err != nil {
+		t.Fatalf("HarvestProcess: %v", err)
+	}
+
+	dirs, err := filepath.Glob(filepath.Join(out, "555_*"))
+	if err != nil {
+		t.Fatalf("glob output: %v", err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("expected no harvested artifacts when threshold is reached, got %v", dirs)
+	}
+}
+
+func TestNewUsesDefaultMaxDiskUsagePercentForInvalidConfig(t *testing.T) {
+	h := New(Config{OutputDir: t.TempDir(), MaxDiskUsagePercent: 0})
+	if h.maxDiskUsage != defaultMaxDiskUsagePercent {
+		t.Fatalf("expected default max disk usage %.2f, got %.2f", defaultMaxDiskUsagePercent, h.maxDiskUsage)
+	}
+}

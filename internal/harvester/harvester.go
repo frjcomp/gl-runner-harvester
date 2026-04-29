@@ -23,9 +23,11 @@ type Harvester struct {
 	harvestFiles   bool
 	secureFiles    bool
 	harvestImages  bool
+	maxDiskUsage   float64
 	secFilesClient secureFilesClient
 	registryClient registryClient
 	imageHarvester func(ctx context.Context, env map[string]string, imageRef, destDir string) error
+	diskUsageFn    func(path string) (float64, error)
 }
 
 type secureFilesClient interface {
@@ -38,16 +40,24 @@ type registryClient interface {
 
 // Config holds optional configuration for Harvester features.
 type Config struct {
-	OutputDir     string
-	ScanSecrets   bool
-	GitLabURL     string
-	HarvestFiles  bool
-	SecureFiles   bool
-	HarvestImages bool
+	OutputDir           string
+	ScanSecrets         bool
+	GitLabURL           string
+	HarvestFiles        bool
+	SecureFiles         bool
+	HarvestImages       bool
+	MaxDiskUsagePercent float64
 }
+
+const defaultMaxDiskUsagePercent = 95.0
 
 // New creates a new Harvester.
 func New(cfg Config) *Harvester {
+	maxDiskUsage := cfg.MaxDiskUsagePercent
+	if maxDiskUsage <= 0 || maxDiskUsage >= 100 {
+		maxDiskUsage = defaultMaxDiskUsagePercent
+	}
+
 	return &Harvester{
 		outputDir:      cfg.OutputDir,
 		scanSecrets:    cfg.ScanSecrets,
@@ -55,9 +65,11 @@ func New(cfg Config) *Harvester {
 		harvestFiles:   cfg.HarvestFiles,
 		secureFiles:    cfg.SecureFiles,
 		harvestImages:  cfg.HarvestImages,
+		maxDiskUsage:   maxDiskUsage,
 		secFilesClient: retriever.NewSecureFiles(cfg.GitLabURL),
 		registryClient: retriever.NewRegistry(cfg.GitLabURL),
 		imageHarvester: HarvestImage,
+		diskUsageFn:    diskUsedPercent,
 	}
 }
 
@@ -110,6 +122,19 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 		return nil
 	}
 
+	if !h.allowDiskWrite(jobID, "start") {
+		if h.scanSecrets {
+			findings, err := scanner.Scan(envVars, sourceDir, h.gitlabURL)
+			if err != nil {
+				log.Warn().Err(err).Str("job_id", jobID).Msg("Secret scan failed")
+			} else {
+				log.Info().Str("job_id", jobID).Int("findings", len(findings)).Msg("Secret scan complete (disk-threshold fallback mode)")
+			}
+		}
+		log.Info().Str("job_id", jobID).Msg("Harvest complete (disk threshold reached; no files written)")
+		return nil
+	}
+
 	ts := time.Now()
 	destRoot := filepath.Join(h.outputDir, fmt.Sprintf("%s_%s", jobID, ts.Format("20060102_150405")))
 
@@ -128,11 +153,15 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 
 	// Copy source code.
 	if sourceDir != "" {
-		srcDest := filepath.Join(destRoot, "source")
-		if err := copyDir(sourceDir, srcDest); err != nil {
-			log.Warn().Err(err).Str("source", sourceDir).Msg("Could not copy source directory")
+		if h.allowDiskWrite(jobID, "source-copy") {
+			srcDest := filepath.Join(destRoot, "source")
+			if err := copyDir(sourceDir, srcDest); err != nil {
+				log.Warn().Err(err).Str("source", sourceDir).Msg("Could not copy source directory")
+			} else {
+				log.Info().Str("dest", srcDest).Msg("Source code copied")
+			}
 		} else {
-			log.Info().Str("dest", srcDest).Msg("Source code copied")
+			log.Warn().Str("job_id", jobID).Msg("Skipping source copy due to disk usage threshold")
 		}
 	}
 
@@ -141,11 +170,15 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 		token := strings.TrimSpace(envVars["CI_JOB_TOKEN"])
 		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
 		if token != "" && projectID != "" {
-			sfDir := filepath.Join(destRoot, "secure_files")
-			if err := h.secFilesClient.FetchAll(ctx, token, projectID, sfDir); err != nil {
-				log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
+			if h.allowDiskWrite(jobID, "secure-files") {
+				sfDir := filepath.Join(destRoot, "secure_files")
+				if err := h.secFilesClient.FetchAll(ctx, token, projectID, sfDir); err != nil {
+					log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
+				} else {
+					log.Info().Str("job_id", jobID).Str("dest", sfDir).Msg("Secure files fetched")
+				}
 			} else {
-				log.Info().Str("job_id", jobID).Str("dest", sfDir).Msg("Secure files fetched")
+				log.Warn().Str("job_id", jobID).Msg("Skipping secure files fetch due to disk usage threshold")
 			}
 		} else {
 			log.Debug().Str("job_id", jobID).Msg("Skipping secure files: CI_JOB_TOKEN or CI_PROJECT_ID not available")
@@ -158,16 +191,20 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
 		ciRegistry := strings.TrimSpace(envVars["CI_REGISTRY"])
 		if token != "" && projectID != "" && ciRegistry != "" {
-			imageRef, err := h.registryClient.LatestImageRef(ctx, token, projectID, ciRegistry)
-			if err != nil {
-				log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
-			} else if imageRef != "" {
-				imgDir := filepath.Join(destRoot, "image")
-				if err := h.imageHarvester(ctx, envVars, imageRef, imgDir); err != nil {
-					log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
+			if h.allowDiskWrite(jobID, "image-harvest") {
+				imageRef, err := h.registryClient.LatestImageRef(ctx, token, projectID, ciRegistry)
+				if err != nil {
+					log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
+				} else if imageRef != "" {
+					imgDir := filepath.Join(destRoot, "image")
+					if err := h.imageHarvester(ctx, envVars, imageRef, imgDir); err != nil {
+						log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
+					}
+				} else {
+					log.Info().Str("job_id", jobID).Msg("No registry images found for project")
 				}
 			} else {
-				log.Info().Str("job_id", jobID).Msg("No registry images found for project")
+				log.Warn().Str("job_id", jobID).Msg("Skipping image harvest due to disk usage threshold")
 			}
 		} else {
 			log.Debug().Str("job_id", jobID).Msg("Skipping image harvest: CI_JOB_TOKEN, CI_PROJECT_ID or CI_REGISTRY not available")
@@ -186,13 +223,37 @@ func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVar
 	}
 
 	// Write summary JSON.
-	summaryPath := filepath.Join(destRoot, "summary.json")
-	if err := writeSummary(summaryPath, data); err != nil {
-		log.Error().Err(err).Msg("Failed to write summary")
+	if h.allowDiskWrite(jobID, "summary") {
+		summaryPath := filepath.Join(destRoot, "summary.json")
+		if err := writeSummary(summaryPath, data); err != nil {
+			log.Error().Err(err).Msg("Failed to write summary")
+		}
+	} else {
+		log.Warn().Str("job_id", jobID).Msg("Skipping summary write due to disk usage threshold")
 	}
 
 	log.Info().Str("output", destRoot).Str("job_id", jobID).Msg("Harvest complete")
 	return nil
+}
+
+func (h *Harvester) allowDiskWrite(jobID, stage string) bool {
+	usedPercent, err := h.diskUsageFn(h.outputDir)
+	if err != nil {
+		log.Warn().Err(err).Str("job_id", jobID).Str("stage", stage).Msg("Disk usage check failed; skipping write operation")
+		return false
+	}
+
+	if usedPercent >= h.maxDiskUsage {
+		log.Warn().
+			Str("job_id", jobID).
+			Str("stage", stage).
+			Float64("disk_used_percent", usedPercent).
+			Float64("max_disk_usage_percent", h.maxDiskUsage).
+			Msg("Disk usage threshold reached; skipping write operation")
+		return false
+	}
+
+	return true
 }
 
 func deriveJobID(jobDir string) string {
