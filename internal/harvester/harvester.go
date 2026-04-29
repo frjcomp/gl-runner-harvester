@@ -1,6 +1,7 @@
 package harvester
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,21 +10,45 @@ import (
 	"strings"
 	"time"
 
+	"github.com/frjcomp/gl-runner-harvester/internal/retriever"
 	"github.com/frjcomp/gl-runner-harvester/internal/scanner"
 	"github.com/rs/zerolog/log"
 )
 
 // Harvester collects source code and environment variables from CI jobs.
 type Harvester struct {
-	outputDir    string
-	scanSecrets  bool
-	gitlabURL    string
-	harvestFiles bool
+	outputDir      string
+	scanSecrets    bool
+	gitlabURL      string
+	harvestFiles   bool
+	secureFiles    bool
+	harvestImages  bool
+	secFilesClient *retriever.SecureFilesRetriever
+	registryClient *retriever.RegistryRetriever
+}
+
+// Config holds optional configuration for Harvester features.
+type Config struct {
+	OutputDir     string
+	ScanSecrets   bool
+	GitLabURL     string
+	HarvestFiles  bool
+	SecureFiles   bool
+	HarvestImages bool
 }
 
 // New creates a new Harvester.
-func New(outputDir string, scanSecrets bool, gitlabURL string, harvestFiles bool) *Harvester {
-	return &Harvester{outputDir: outputDir, scanSecrets: scanSecrets, gitlabURL: gitlabURL, harvestFiles: harvestFiles}
+func New(cfg Config) *Harvester {
+	return &Harvester{
+		outputDir:      cfg.OutputDir,
+		scanSecrets:    cfg.ScanSecrets,
+		gitlabURL:      cfg.GitLabURL,
+		harvestFiles:   cfg.HarvestFiles,
+		secureFiles:    cfg.SecureFiles,
+		harvestImages:  cfg.HarvestImages,
+		secFilesClient: retriever.NewSecureFiles(cfg.GitLabURL),
+		registryClient: retriever.NewRegistry(cfg.GitLabURL),
+	}
 }
 
 // JobData holds all harvested information for a single CI job.
@@ -98,6 +123,44 @@ func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) 
 			log.Warn().Err(err).Str("source", sourceDir).Msg("Could not copy source directory")
 		} else {
 			log.Info().Str("dest", srcDest).Msg("Source code copied")
+		}
+	}
+
+	// Fetch GitLab secure files.
+	if h.secureFiles {
+		token := strings.TrimSpace(envVars["CI_JOB_TOKEN"])
+		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
+		if token != "" && projectID != "" {
+			sfDir := filepath.Join(destRoot, "secure_files")
+			if err := h.secFilesClient.FetchAll(context.Background(), token, projectID, sfDir); err != nil {
+				log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
+			} else {
+				log.Info().Str("job_id", jobID).Str("dest", sfDir).Msg("Secure files fetched")
+			}
+		} else {
+			log.Debug().Str("job_id", jobID).Msg("Skipping secure files: CI_JOB_TOKEN or CI_PROJECT_ID not available")
+		}
+	}
+
+	// Pull and save the project's latest registry image.
+	if h.harvestImages {
+		token := strings.TrimSpace(envVars["CI_JOB_TOKEN"])
+		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
+		ciRegistry := strings.TrimSpace(envVars["CI_REGISTRY"])
+		if token != "" && projectID != "" && ciRegistry != "" {
+			imageRef, err := h.registryClient.LatestImageRef(context.Background(), token, projectID, ciRegistry)
+			if err != nil {
+				log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
+			} else if imageRef != "" {
+				imgDir := filepath.Join(destRoot, "image")
+				if err := HarvestImage(context.Background(), envVars, imageRef, imgDir); err != nil {
+					log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
+				}
+			} else {
+				log.Info().Str("job_id", jobID).Msg("No registry images found for project")
+			}
+		} else {
+			log.Debug().Str("job_id", jobID).Msg("Skipping image harvest: CI_JOB_TOKEN, CI_PROJECT_ID or CI_REGISTRY not available")
 		}
 	}
 

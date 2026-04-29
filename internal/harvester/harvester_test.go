@@ -100,7 +100,7 @@ func TestHarvestMethodsNoScan(t *testing.T) {
 		t.Fatalf("write source file: %v", err)
 	}
 
-	h := New(out, false, "", true)
+	h := New(Config{OutputDir: out, ScanSecrets: false, GitLabURL: "", HarvestFiles: true})
 	if err := h.HarvestJob(src); err != nil {
 		t.Fatalf("HarvestJob: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestHarvestMethodsNoScan(t *testing.T) {
 
 func TestHarvestProcessSummaryContainsEnvAndCIVars(t *testing.T) {
 	out := t.TempDir()
-	h := New(out, false, "", true)
+	h := New(Config{OutputDir: out, ScanSecrets: false, GitLabURL: "", HarvestFiles: true})
 
 	env := map[string]string{
 		"CI_JOB_ID":      "222",
@@ -151,7 +151,7 @@ func TestHarvestProcessNoHarvestFilesWritesNoArtifacts(t *testing.T) {
 		t.Fatalf("write source file: %v", err)
 	}
 
-	h := New(out, true, "https://gitlab.com", false)
+	h := New(Config{OutputDir: out, ScanSecrets: true, GitLabURL: "https://gitlab.com", HarvestFiles: false})
 	env := map[string]string{
 		"CI_JOB_ID":      "333",
 		"CI_PROJECT_DIR": src,

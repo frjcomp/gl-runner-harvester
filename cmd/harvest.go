@@ -13,13 +13,15 @@ import (
 )
 
 var (
-	collectionPath string
-	runnerConfig   string
-	executor       string
-	interval       int
-	scanSecrets    bool
-	gitlabURL      string
-	noHarvestFiles bool
+	collectionPath  string
+	runnerConfig    string
+	executor        string
+	interval        int
+	scanSecrets     bool
+	gitlabURL       string
+	noHarvestFiles  bool
+	noSecureFiles   bool
+	noHarvestImages bool
 )
 
 var harvestCmd = &cobra.Command{
@@ -38,6 +40,8 @@ func init() {
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
 	harvestCmd.Flags().BoolVar(&noHarvestFiles, "no-harvest-files", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
 	harvestCmd.Flags().StringVar(&gitlabURL, "gitlab-url", "https://gitlab.com", "GitLab base URL used to verify GitLab PAT findings")
+	harvestCmd.Flags().BoolVar(&noSecureFiles, "no-secure-files", false, "Disable fetching GitLab secure files using CI_JOB_TOKEN")
+	harvestCmd.Flags().BoolVar(&noHarvestImages, "no-harvest-images", false, "Disable pulling and saving the latest project registry image")
 }
 
 func runHarvest(cmd *cobra.Command, args []string) error {
@@ -89,7 +93,14 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 	collectPath := strings.TrimSpace(collectionPath)
 
 	// 5. Create harvester
-	h := harvester.New(collectPath, scanSecrets, normalizedGitLabURL, !noHarvestFiles)
+	h := harvester.New(harvester.Config{
+		OutputDir:     collectPath,
+		ScanSecrets:   scanSecrets,
+		GitLabURL:     normalizedGitLabURL,
+		HarvestFiles:  !noHarvestFiles,
+		SecureFiles:   !noSecureFiles,
+		HarvestImages: !noHarvestImages,
+	})
 
 	// 6. Start monitoring loop
 	m := monitor.New(osInfo, execType, interval, h)
