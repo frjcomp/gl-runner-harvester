@@ -71,6 +71,14 @@ func New(osInfo detector.OSInfo, execType detector.ExecutorType, interval int, h
 - Use interfaces to mock external dependencies (filesystem, Docker API, process list).
 - Do not test `main()` directly; test the underlying logic functions.
 
+## Code Quality Checks
+
+Before committing or submitting changes:
+1. Run `go fmt ./...` to ensure consistent formatting — the project enforces standard Go formatting.
+2. Run `go test ./...` and verify **all tests pass**. Add tests for any new logic.
+3. Ensure no new external dependencies are introduced without justification.
+4. Check that code aligns with Guiding Principles and Coding Conventions.
+
 ## Threat Model Context
 
 This tool is designed to run in the context of an attacker or red-teamer who has shell access on a GitLab runner host as the runner user. It is a reconnaissance tool. All code must be written with this adversarial context in mind.
