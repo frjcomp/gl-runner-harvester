@@ -23,8 +23,17 @@ type Harvester struct {
 	harvestFiles   bool
 	secureFiles    bool
 	harvestImages  bool
-	secFilesClient *retriever.SecureFilesRetriever
-	registryClient *retriever.RegistryRetriever
+	secFilesClient secureFilesClient
+	registryClient registryClient
+	imageHarvester func(ctx context.Context, env map[string]string, imageRef, destDir string) error
+}
+
+type secureFilesClient interface {
+	FetchAll(ctx context.Context, token, projectID, destDir string) error
+}
+
+type registryClient interface {
+	LatestImageRef(ctx context.Context, token, projectID, registry string) (string, error)
 }
 
 // Config holds optional configuration for Harvester features.
@@ -48,6 +57,7 @@ func New(cfg Config) *Harvester {
 		harvestImages:  cfg.HarvestImages,
 		secFilesClient: retriever.NewSecureFiles(cfg.GitLabURL),
 		registryClient: retriever.NewRegistry(cfg.GitLabURL),
+		imageHarvester: HarvestImage,
 	}
 }
 
@@ -63,15 +73,15 @@ type JobData struct {
 }
 
 // HarvestJob harvests a specific job build directory.
-func (h *Harvester) HarvestJob(jobDir string) error {
+func (h *Harvester) HarvestJob(ctx context.Context, jobDir string) error {
 	jobID := deriveJobID(jobDir)
 	env := collectEnvVars()
 	env["GL_HARVEST_DISCOVERY_MODE"] = "directory"
-	return h.harvest(jobID, jobDir, env)
+	return h.harvest(ctx, jobID, jobDir, env)
 }
 
 // HarvestProcess harvests a job discovered from a host process snapshot.
-func (h *Harvester) HarvestProcess(jobID string, env map[string]string, cmdline string) error {
+func (h *Harvester) HarvestProcess(ctx context.Context, jobID string, env map[string]string, cmdline string) error {
 	_ = cmdline
 	if jobID == "" {
 		return fmt.Errorf("job id is required")
@@ -83,10 +93,10 @@ func (h *Harvester) HarvestProcess(jobID string, env map[string]string, cmdline 
 		env["GL_HARVEST_DISCOVERY_MODE"] = "process"
 	}
 	sourceDir := strings.TrimSpace(env["CI_PROJECT_DIR"])
-	return h.harvest(jobID, sourceDir, env)
+	return h.harvest(ctx, jobID, sourceDir, env)
 }
 
-func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) error {
+func (h *Harvester) harvest(ctx context.Context, jobID, sourceDir string, envVars map[string]string) error {
 	if !h.harvestFiles {
 		if h.scanSecrets {
 			findings, err := scanner.Scan(envVars, sourceDir, h.gitlabURL)
@@ -132,7 +142,7 @@ func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) 
 		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
 		if token != "" && projectID != "" {
 			sfDir := filepath.Join(destRoot, "secure_files")
-			if err := h.secFilesClient.FetchAll(context.Background(), token, projectID, sfDir); err != nil {
+			if err := h.secFilesClient.FetchAll(ctx, token, projectID, sfDir); err != nil {
 				log.Warn().Err(err).Str("job_id", jobID).Msg("Secure files fetch failed")
 			} else {
 				log.Info().Str("job_id", jobID).Str("dest", sfDir).Msg("Secure files fetched")
@@ -148,12 +158,12 @@ func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) 
 		projectID := strings.TrimSpace(envVars["CI_PROJECT_ID"])
 		ciRegistry := strings.TrimSpace(envVars["CI_REGISTRY"])
 		if token != "" && projectID != "" && ciRegistry != "" {
-			imageRef, err := h.registryClient.LatestImageRef(context.Background(), token, projectID, ciRegistry)
+			imageRef, err := h.registryClient.LatestImageRef(ctx, token, projectID, ciRegistry)
 			if err != nil {
 				log.Warn().Err(err).Str("job_id", jobID).Msg("Registry image lookup failed")
 			} else if imageRef != "" {
 				imgDir := filepath.Join(destRoot, "image")
-				if err := HarvestImage(context.Background(), envVars, imageRef, imgDir); err != nil {
+				if err := h.imageHarvester(ctx, envVars, imageRef, imgDir); err != nil {
 					log.Warn().Err(err).Str("job_id", jobID).Str("image", imageRef).Msg("Image harvest failed")
 				}
 			} else {

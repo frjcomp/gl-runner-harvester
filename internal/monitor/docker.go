@@ -45,7 +45,8 @@ func defaultDockerStrategy(osInfo detector.OSInfo) (*strategyWithCloser, error) 
 }
 
 type sdkDockerProvider struct {
-	cli *client.Client
+	cli           *client.Client
+	extractedDirs map[string]string // cache: container ID -> resolved host source dir
 }
 
 type containerProjectDirExtractor func(ctx context.Context, containerID, containerProjectDir string) (string, error)
@@ -69,7 +70,7 @@ func newDockerProvider(osInfo detector.OSInfo) (*sdkDockerProvider, error) {
 		return nil, fmt.Errorf("docker daemon ping failed: %w", err)
 	}
 
-	return &sdkDockerProvider{cli: cli}, nil
+	return &sdkDockerProvider{cli: cli, extractedDirs: make(map[string]string)}, nil
 }
 
 func dockerHostForOS(goos string) (string, error) {
@@ -98,6 +99,17 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 		return nil, err
 	}
 
+	// Build a set of currently-running container IDs so stale cache entries can be pruned.
+	runningIDs := make(map[string]struct{}, len(containers))
+	for _, c := range containers {
+		runningIDs[c.ID] = struct{}{}
+	}
+	for id := range s.extractedDirs {
+		if _, ok := runningIDs[id]; !ok {
+			delete(s.extractedDirs, id)
+		}
+	}
+
 	out := make([]discoveredJob, 0, len(containers))
 	for _, c := range containers {
 		inspect, err := s.cli.ContainerInspect(ctx, c.ID)
@@ -120,11 +132,19 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 		}
 
 		containerProjectDir := ciLookup(env, "CI_PROJECT_DIR")
-		sourceDir, extracted, extractErr := resolveSourceDirWithFallback(ctx, c.ID, containerProjectDir, inspect.Mounts, s.extractContainerProjectDir)
-		if extractErr != nil {
-			log.Debug().Err(extractErr).Str("container_id", c.ID).Str("container_project_dir", containerProjectDir).Msg("Docker project dir extraction fallback failed")
-		} else if extracted {
-			log.Info().Str("container_id", c.ID).Str("source_dir", sourceDir).Msg("Docker project dir extraction fallback succeeded")
+		var sourceDir string
+		if cached, ok := s.extractedDirs[c.ID]; ok {
+			sourceDir = cached
+		} else {
+			var extracted bool
+			var extractErr error
+			sourceDir, extracted, extractErr = resolveSourceDirWithFallback(ctx, c.ID, containerProjectDir, inspect.Mounts, s.extractContainerProjectDir)
+			if extractErr != nil {
+				log.Debug().Err(extractErr).Str("container_id", c.ID).Str("container_project_dir", containerProjectDir).Msg("Docker project dir extraction fallback failed")
+			} else if extracted {
+				log.Info().Str("container_id", c.ID).Str("source_dir", sourceDir).Msg("Docker project dir extraction fallback succeeded")
+				s.extractedDirs[c.ID] = sourceDir
+			}
 		}
 		if sourceDir != "" {
 			env["CI_PROJECT_DIR"] = sourceDir

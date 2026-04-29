@@ -269,3 +269,59 @@ func TestIsLikelyGitLabJobContainer(t *testing.T) {
 		t.Fatalf("expected non-CI container to be excluded")
 	}
 }
+
+func TestSdkDockerProviderCachesExtraction(t *testing.T) {
+	callCount := 0
+	extractor := func(_ context.Context, _ string, _ string) (string, error) {
+		callCount++
+		return "/tmp/extracted/project", nil
+	}
+
+	mounts := []container.MountPoint{{Type: "volume", Destination: "/builds", Source: "/var/lib/docker/volumes/v1/_data"}}
+
+	provider := &sdkDockerProvider{
+		extractedDirs: make(map[string]string),
+	}
+
+	// First call: extraction should happen and be cached.
+	got1, _, err := resolveSourceDirWithFallback(context.Background(), "cid-1", "/builds/group/project", mounts, extractor)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected extractor called 1 time, got %d", callCount)
+	}
+	provider.extractedDirs["cid-1"] = got1
+
+	// Second call: cache hit, extractor must not be called again.
+	if cached, ok := provider.extractedDirs["cid-1"]; !ok || cached != got1 {
+		t.Fatalf("expected cache hit for cid-1, got ok=%v val=%q", ok, cached)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected extractor still called only 1 time, got %d", callCount)
+	}
+}
+
+func TestSdkDockerProviderPrunesStaleCache(t *testing.T) {
+	provider := &sdkDockerProvider{
+		extractedDirs: map[string]string{
+			"cid-1": "/tmp/extracted/project-a",
+			"cid-2": "/tmp/extracted/project-b",
+		},
+	}
+
+	// Simulate: only cid-1 is still running.
+	runningIDs := map[string]struct{}{"cid-1": {}}
+	for id := range provider.extractedDirs {
+		if _, ok := runningIDs[id]; !ok {
+			delete(provider.extractedDirs, id)
+		}
+	}
+
+	if _, ok := provider.extractedDirs["cid-2"]; ok {
+		t.Fatalf("expected cid-2 to be pruned from extractedDirs")
+	}
+	if _, ok := provider.extractedDirs["cid-1"]; !ok {
+		t.Fatalf("expected cid-1 to remain in extractedDirs")
+	}
+}

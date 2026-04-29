@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,18 +14,56 @@ import (
 )
 
 type fakeHarvester struct {
-	jobs  []string
-	procs []string
+	mu             sync.Mutex
+	jobs           []string
+	procs          []string
+	processStarted chan string
+	processCtx     chan context.Context
+	blockProcess   <-chan struct{}
 }
 
-func (f *fakeHarvester) HarvestJob(jobDir string) error {
+func (f *fakeHarvester) HarvestJob(_ context.Context, jobDir string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.jobs = append(f.jobs, jobDir)
 	return nil
 }
 
-func (f *fakeHarvester) HarvestProcess(jobID string, _ map[string]string, _ string) error {
+func (f *fakeHarvester) HarvestProcess(ctx context.Context, jobID string, _ map[string]string, _ string) error {
+	if f.processStarted != nil {
+		f.processStarted <- jobID
+	}
+	if f.processCtx != nil {
+		f.processCtx <- ctx
+	}
+	if f.blockProcess != nil {
+		<-f.blockProcess
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.procs = append(f.procs, jobID)
 	return nil
+}
+
+func (f *fakeHarvester) jobCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.jobs)
+}
+
+func (f *fakeHarvester) firstJob() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.jobs) == 0 {
+		return ""
+	}
+	return f.jobs[0]
+}
+
+func (f *fakeHarvester) processCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.procs)
 }
 
 type fakeStrategy struct {
@@ -118,16 +157,18 @@ func TestPollHarvestsNewDirectories(t *testing.T) {
 		strategy: &directoryDiscoveryStrategy{mode: "test-dir", dirs: []string{tmp}},
 	}
 	m.poll(context.Background())
+	m.waitForHarvests()
 
-	if len(h.jobs) != 1 {
-		t.Fatalf("expected one harvested job, got %d", len(h.jobs))
+	if h.jobCount() != 1 {
+		t.Fatalf("expected one harvested job, got %d", h.jobCount())
 	}
-	if h.jobs[0] != jobDir {
-		t.Fatalf("unexpected job dir: %s", h.jobs[0])
+	if h.firstJob() != jobDir {
+		t.Fatalf("unexpected job dir: %s", h.firstJob())
 	}
 
 	m.poll(context.Background())
-	if len(h.jobs) != 1 {
+	m.waitForHarvests()
+	if h.jobCount() != 1 {
 		t.Fatalf("expected no duplicate harvests")
 	}
 }
@@ -149,8 +190,9 @@ func TestPollHarvestsNewProcessJobs(t *testing.T) {
 	}
 
 	m.poll(context.Background())
-	if len(h.procs) != 2 {
-		t.Fatalf("expected two harvested process jobs, got %d", len(h.procs))
+	m.waitForHarvests()
+	if h.processCount() != 2 {
+		t.Fatalf("expected two harvested process jobs, got %d", h.processCount())
 	}
 
 	m.strategy = &processDiscoveryStrategy{
@@ -160,9 +202,95 @@ func TestPollHarvestsNewProcessJobs(t *testing.T) {
 		},
 	}
 	m.poll(context.Background())
-	if len(h.procs) != 2 {
+	m.waitForHarvests()
+	if h.processCount() != 2 {
 		t.Fatalf("expected deduped process jobs, got %d", len(h.procs))
 	}
+}
+
+func TestPollDoesNotBlockOnInFlightHarvest(t *testing.T) {
+	block := make(chan struct{})
+	h := &fakeHarvester{processStarted: make(chan string, 2), blockProcess: block}
+	m := &Monitor{
+		h:    h,
+		seen: map[string]struct{}{},
+		strategy: &fakeStrategy{mode: "test", jobs: []discoveredJob{{
+			Identity:      "job:101",
+			JobID:         "101",
+			Cmdline:       "bash",
+			Env:           map[string]string{"CI_JOB_ID": "101"},
+			DiscoveryMode: "test",
+		}}},
+	}
+
+	m.poll(context.Background())
+	select {
+	case got := <-h.processStarted:
+		if got != "101" {
+			t.Fatalf("expected first started job 101, got %q", got)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for first harvest to start")
+	}
+
+	m.strategy = &fakeStrategy{mode: "test", jobs: []discoveredJob{{
+		Identity:      "job:102",
+		JobID:         "102",
+		Cmdline:       "bash",
+		Env:           map[string]string{"CI_JOB_ID": "102"},
+		DiscoveryMode: "test",
+	}}}
+	m.poll(context.Background())
+
+	select {
+	case got := <-h.processStarted:
+		if got != "102" {
+			t.Fatalf("expected second started job 102, got %q", got)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("second poll did not dispatch while first harvest was still blocked")
+	}
+
+	close(block)
+	m.waitForHarvests()
+	if h.processCount() != 2 {
+		t.Fatalf("expected both process harvests to complete, got %d", h.processCount())
+	}
+}
+
+func TestPollPassesContextToHarvestProcess(t *testing.T) {
+	h := &fakeHarvester{processCtx: make(chan context.Context, 1)}
+	m := &Monitor{
+		h:    h,
+		seen: map[string]struct{}{},
+		strategy: &fakeStrategy{mode: "test", jobs: []discoveredJob{{
+			Identity:      "job:101",
+			JobID:         "101",
+			Cmdline:       "bash",
+			Env:           map[string]string{"CI_JOB_ID": "101"},
+			DiscoveryMode: "test",
+		}}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.poll(ctx)
+
+	var harvestCtx context.Context
+	select {
+	case harvestCtx = <-h.processCtx:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for harvest context")
+	}
+
+	cancel()
+	select {
+	case <-harvestCtx.Done():
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("harvest context was not canceled")
+	}
+
+	m.waitForHarvests()
 }
 
 func TestPollHandlesStrategyError(t *testing.T) {

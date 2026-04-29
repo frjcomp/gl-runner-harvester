@@ -1,11 +1,20 @@
 package harvester
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+type fakeRegistryClient struct {
+	latestImageRef func(ctx context.Context, token, projectID, registry string) (string, error)
+}
+
+func (f fakeRegistryClient) LatestImageRef(ctx context.Context, token, projectID, registry string) (string, error) {
+	return f.latestImageRef(ctx, token, projectID, registry)
+}
 
 func TestDeriveJobID(t *testing.T) {
 	if got := deriveJobID("/tmp/job"); got != "job" {
@@ -101,7 +110,7 @@ func TestHarvestMethodsNoScan(t *testing.T) {
 	}
 
 	h := New(Config{OutputDir: out, ScanSecrets: false, GitLabURL: "", HarvestFiles: true})
-	if err := h.HarvestJob(src); err != nil {
+	if err := h.HarvestJob(context.Background(), src); err != nil {
 		t.Fatalf("HarvestJob: %v", err)
 	}
 }
@@ -116,7 +125,7 @@ func TestHarvestProcessSummaryContainsEnvAndCIVars(t *testing.T) {
 		"OTHER_KEY":      "value",
 	}
 
-	if err := h.HarvestProcess("222", env, "powershell -File job.ps1"); err != nil {
+	if err := h.HarvestProcess(context.Background(), "222", env, "powershell -File job.ps1"); err != nil {
 		t.Fatalf("HarvestProcess: %v", err)
 	}
 
@@ -156,7 +165,7 @@ func TestHarvestProcessNoHarvestFilesWritesNoArtifacts(t *testing.T) {
 		"CI_JOB_ID":      "333",
 		"CI_PROJECT_DIR": src,
 	}
-	if err := h.HarvestProcess("333", env, "bash -lc run"); err != nil {
+	if err := h.HarvestProcess(context.Background(), "333", env, "bash -lc run"); err != nil {
 		t.Fatalf("HarvestProcess: %v", err)
 	}
 
@@ -166,5 +175,48 @@ func TestHarvestProcessNoHarvestFilesWritesNoArtifacts(t *testing.T) {
 	}
 	if len(dirs) != 0 {
 		t.Fatalf("expected no harvested artifacts in scan-only mode, got %v", dirs)
+	}
+}
+
+func TestHarvestProcessPassesContextToImageHarvest(t *testing.T) {
+	out := t.TempDir()
+	src := t.TempDir()
+	h := New(Config{OutputDir: out, ScanSecrets: false, GitLabURL: "", HarvestFiles: true, HarvestImages: true})
+
+	ctx := context.WithValue(context.Background(), "test-key", "test-value")
+	registryCalled := false
+	imageCalled := false
+
+	h.registryClient = fakeRegistryClient{latestImageRef: func(got context.Context, token, projectID, registry string) (string, error) {
+		registryCalled = true
+		if got != ctx {
+			t.Fatalf("expected registry client to receive original context")
+		}
+		return "registry.example.com/group/project:latest", nil
+	}}
+	h.imageHarvester = func(got context.Context, env map[string]string, imageRef, destDir string) error {
+		imageCalled = true
+		if got != ctx {
+			t.Fatalf("expected image harvester to receive original context")
+		}
+		return nil
+	}
+
+	env := map[string]string{
+		"CI_JOB_ID":      "444",
+		"CI_PROJECT_DIR": src,
+		"CI_JOB_TOKEN":   "token",
+		"CI_PROJECT_ID":  "123",
+		"CI_REGISTRY":    "registry.example.com",
+	}
+
+	if err := h.HarvestProcess(ctx, "444", env, "bash -lc run"); err != nil {
+		t.Fatalf("HarvestProcess: %v", err)
+	}
+	if !registryCalled {
+		t.Fatalf("expected registry lookup to be called")
+	}
+	if !imageCalled {
+		t.Fatalf("expected image harvester to be called")
 	}
 }

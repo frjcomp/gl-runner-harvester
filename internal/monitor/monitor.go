@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,18 +20,19 @@ import (
 
 // Monitor watches for active GitLab CI/CD jobs and triggers the harvester.
 type Monitor struct {
-	osInfo   detector.OSInfo
-	execType detector.ExecutorType
-	interval time.Duration
-	h        jobHarvester
-	seen     map[string]struct{}
-	strategy discoveryStrategy
-	closer   io.Closer
+	osInfo    detector.OSInfo
+	execType  detector.ExecutorType
+	interval  time.Duration
+	h         jobHarvester
+	seen      map[string]struct{}
+	strategy  discoveryStrategy
+	closer    io.Closer
+	harvestWG sync.WaitGroup
 }
 
 type jobHarvester interface {
-	HarvestJob(jobDir string) error
-	HarvestProcess(jobID string, env map[string]string, cmdline string) error
+	HarvestJob(ctx context.Context, jobDir string) error
+	HarvestProcess(ctx context.Context, jobID string, env map[string]string, cmdline string) error
 }
 
 type processJob struct {
@@ -208,6 +210,7 @@ func (m *Monitor) startLoop(ctx context.Context, tick <-chan time.Time) error {
 	for {
 		select {
 		case <-ctx.Done():
+			m.waitForHarvests()
 			return ctx.Err()
 		case <-tick:
 			m.poll(ctx)
@@ -227,13 +230,21 @@ func (m *Monitor) poll(ctx context.Context) {
 			continue
 		}
 		m.seen[job.Identity] = struct{}{}
+		m.dispatchHarvest(ctx, job)
+	}
+}
+
+func (m *Monitor) dispatchHarvest(ctx context.Context, job discoveredJob) {
+	m.harvestWG.Add(1)
+	go func() {
+		defer m.harvestWG.Done()
 
 		if job.IsDirectory {
 			log.Info().Str("job_dir", job.SourceDir).Str("mode", job.DiscoveryMode).Msg("New job directory detected")
-			if err := m.h.HarvestJob(job.SourceDir); err != nil {
+			if err := m.h.HarvestJob(ctx, job.SourceDir); err != nil {
 				log.Error().Err(err).Str("job_dir", job.SourceDir).Msg("Harvest failed")
 			}
-			continue
+			return
 		}
 
 		log.Info().Str("job_id", job.JobID).Str("cmdline", job.Cmdline).Str("mode", job.DiscoveryMode).Msg("New job execution detected")
@@ -242,10 +253,14 @@ func (m *Monitor) poll(ctx context.Context) {
 			env = map[string]string{}
 		}
 		env["GL_HARVEST_DISCOVERY_MODE"] = job.DiscoveryMode
-		if err := m.h.HarvestProcess(job.JobID, env, job.Cmdline); err != nil {
+		if err := m.h.HarvestProcess(ctx, job.JobID, env, job.Cmdline); err != nil {
 			log.Error().Err(err).Str("job_id", job.JobID).Msg("Harvest failed")
 		}
-	}
+	}()
+}
+
+func (m *Monitor) waitForHarvests() {
+	m.harvestWG.Wait()
 }
 
 func shellBuildDirs(goos string) []string {
