@@ -106,7 +106,7 @@ func TestHarvestMethodsNoScan(t *testing.T) {
 	}
 }
 
-func TestHarvestProcessWritesEnvSnapshots(t *testing.T) {
+func TestHarvestProcessSummaryContainsEnvAndCIVars(t *testing.T) {
 	out := t.TempDir()
 	h := New(out, false, "", true)
 
@@ -125,30 +125,21 @@ func TestHarvestProcessWritesEnvSnapshots(t *testing.T) {
 		t.Fatalf("expected one output dir, got %v (err=%v)", dirs, err)
 	}
 
-	envRaw, err := os.ReadFile(filepath.Join(dirs[0], "env_vars.json"))
+	summaryRaw, err := os.ReadFile(filepath.Join(dirs[0], "summary.json"))
 	if err != nil {
-		t.Fatalf("read env_vars.json: %v", err)
+		t.Fatalf("read summary.json: %v", err)
 	}
-	var envOut map[string]string
-	if err := json.Unmarshal(envRaw, &envOut); err != nil {
-		t.Fatalf("unmarshal env vars: %v", err)
+	var got JobData
+	if err := json.Unmarshal(summaryRaw, &got); err != nil {
+		t.Fatalf("unmarshal summary: %v", err)
 	}
-	if envOut["OTHER_KEY"] != "value" {
+	if got.EnvVars["OTHER_KEY"] != "value" {
 		t.Fatalf("expected full env map to be persisted")
 	}
-
-	ciRaw, err := os.ReadFile(filepath.Join(dirs[0], "ci_vars.json"))
-	if err != nil {
-		t.Fatalf("read ci_vars.json: %v", err)
-	}
-	var ciOut map[string]string
-	if err := json.Unmarshal(ciRaw, &ciOut); err != nil {
-		t.Fatalf("unmarshal ci vars: %v", err)
-	}
-	if ciOut["CI_JOB_ID"] != "222" {
+	if got.CIVars["CI_JOB_ID"] != "222" {
 		t.Fatalf("expected CI vars to be persisted")
 	}
-	if _, ok := ciOut["OTHER_KEY"]; ok {
+	if _, ok := got.CIVars["OTHER_KEY"]; ok {
 		t.Fatalf("did not expect non-CI key in ci vars snapshot")
 	}
 }

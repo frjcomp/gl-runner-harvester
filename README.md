@@ -35,23 +35,8 @@ Example output directory structure:
     │   ├── .git/
     │   ├── .gitlab-ci.yml
     │   └── README.md
-    ├── env_vars.json              # All environment variables
-    ├── summary.json               # Job metadata and findings
-    └── scan_findings.json         # Secret scan results (if enabled)
+    └── summary.json               # Job metadata, env/CI vars, and scan findings
 ```
-
-Available flags:
-- `--executor` — Manually set executor type (shell, ssh, docker, kubernetes)
-- `--collection-path` — Directory to store harvested data (default: `/tmp/gl-harvest`)
-- `--runner-config` — Path to GitLab runner config.toml (auto-detected if not specified)
-- `--interval` — Polling interval in seconds (default: 5)
-- `--scan` — Enable secret scanning (default: true)
-- `--log-level` — Set verbosity: trace, debug, info, warn, error (default: info)
-- `--no-harvest-files` — Scan in-place only; do not write files to disk
-
-## Releases
-
-Pre-built binaries are published on every `v*` tag in [GitHub Releases](https://github.com/frjcomp/gl-runner-harvester/releases).
 
 ## Installation
 
@@ -60,9 +45,4 @@ Install the latest Linux/macOS release with:
 ```bash
 curl -fsSL https://frjcomp.github.io/gl-runner-harvester/install.sh | sh
 ```
-
-The published installer script is generated in the release workflow from `.goreleaser.yaml` using `binstiller` (it is not maintained manually in this repository).
-
-Security warning: review the installation script before executing it, and do not pipe remote scripts into a privileged shell without verifying the source first.
-
 You can also download binaries manually from [GitHub Releases](https://github.com/frjcomp/gl-runner-harvester/releases).

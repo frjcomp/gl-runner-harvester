@@ -112,12 +112,6 @@ func (h *Harvester) harvest(jobID, sourceDir string, envVars map[string]string) 
 		}
 	}
 
-	// Persist full env snapshots for each detected job run after scanning to
-	// avoid re-detecting env values from generated output files.
-	if err := writeEnvSnapshots(destRoot, data.EnvVars, data.CIVars); err != nil {
-		log.Warn().Err(err).Msg("Failed to write environment snapshots")
-	}
-
 	// Write summary JSON.
 	summaryPath := filepath.Join(destRoot, "summary.json")
 	if err := writeSummary(summaryPath, data); err != nil {
@@ -149,25 +143,6 @@ func collectCIVarsFromMap(source map[string]string) map[string]string {
 		}
 	}
 	return m
-}
-
-func writeEnvSnapshots(destRoot string, envVars, ciVars map[string]string) error {
-	if err := writeMapJSON(filepath.Join(destRoot, "env_vars.json"), envVars); err != nil {
-		return err
-	}
-	return writeMapJSON(filepath.Join(destRoot, "ci_vars.json"), ciVars)
-}
-
-func writeMapJSON(path string, data map[string]string) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	return enc.Encode(data)
 }
 
 func writeSummary(path string, data JobData) error {
