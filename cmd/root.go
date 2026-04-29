@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/zerolog"
@@ -11,6 +14,7 @@ import (
 
 var (
 	logLevel string
+	logFile  string
 	version  = "dev"
 
 	getArgs      = func() []string { return os.Args[1:] }
@@ -25,7 +29,7 @@ var rootCmd = &cobra.Command{
 monitors CI/CD jobs, harvests source code when enabled,
 and scans for secrets using pattern matching and titus.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		return configureLogging(logLevel)
+		return configureLogging(logLevel, logFile)
 	},
 }
 
@@ -37,8 +41,11 @@ var versionCmd = &cobra.Command{
 	},
 }
 
-func configureLogging(level string) error {
-	writer := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}
+func configureLogging(level, logPath string) error {
+	writer, err := newLogWriter(logPath)
+	if err != nil {
+		return err
+	}
 	log.Logger = zerolog.New(writer).With().Timestamp().Logger()
 
 	normalizedLevel := strings.ToLower(level)
@@ -60,6 +67,31 @@ func configureLogging(level string) error {
 
 	log.Info().Str("log_level", normalizedLevel).Msg("Log level configured")
 	return nil
+}
+
+func newLogWriter(logPath string) (io.Writer, error) {
+	if strings.TrimSpace(logPath) == "" {
+		return zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}, nil
+	}
+
+	cleanPath := filepath.Clean(logPath)
+	dir := filepath.Dir(cleanPath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create log directory: %w", err)
+		}
+	}
+
+	file, err := os.OpenFile(cleanPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+
+	return zerolog.ConsoleWriter{
+		Out:        file,
+		TimeFormat: "15:04:05",
+		NoColor:    true,
+	}, nil
 }
 
 func Execute() {
@@ -88,6 +120,7 @@ func shouldDefaultToHarvest(args []string) bool {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level (trace, debug, info, warn, error)")
+	rootCmd.PersistentFlags().StringVarP(&logFile, "log", "l", "", "Write logs to a file")
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(harvestCmd)
 }

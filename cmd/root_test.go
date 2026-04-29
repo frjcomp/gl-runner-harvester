@@ -2,6 +2,9 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -23,13 +26,34 @@ func TestConfigureLoggingLevels(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := configureLogging(tc.input); err != nil {
+			if err := configureLogging(tc.input, ""); err != nil {
 				t.Fatalf("configureLogging returned error: %v", err)
 			}
 			if got := zerolog.GlobalLevel(); got != tc.want {
 				t.Fatalf("expected level %v, got %v", tc.want, got)
 			}
 		})
+	}
+}
+
+func TestConfigureLoggingWritesPlainTextFile(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "harvester.log")
+
+	if err := configureLogging("info", logPath); err != nil {
+		t.Fatalf("configureLogging returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log file: %v", err)
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "Log level configured") {
+		t.Fatalf("expected configuration log entry in file, got %q", content)
+	}
+	if strings.Contains(content, "\x1b[") {
+		t.Fatalf("expected file logs without ANSI color codes, got %q", content)
 	}
 }
 

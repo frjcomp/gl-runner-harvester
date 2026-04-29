@@ -45,6 +45,8 @@ func init() {
 }
 
 func runHarvest(cmd *cobra.Command, args []string) error {
+	log.Info().Str("version", version).Msg("Starting gl-runner-harvester")
+
 	// 1. Detect OS info
 	osInfo := detector.DetectOS()
 	log.Info().
