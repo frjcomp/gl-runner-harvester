@@ -1,6 +1,11 @@
 package monitor
 
 import (
+	"archive/tar"
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/docker/docker/api/types/container"
@@ -77,6 +82,176 @@ func TestResolveContainerProjectDirToHostNoMatch(t *testing.T) {
 	mounts := []container.MountPoint{{Destination: "/cache", Source: "/host/cache"}}
 	if got := resolveContainerProjectDirToHost("/builds/group/project", mounts); got != "" {
 		t.Fatalf("expected empty mapping when no mount matches, got %q", got)
+	}
+}
+
+func TestResolveContainerProjectDirToHostNamedVolumeMount(t *testing.T) {
+	mounts := []container.MountPoint{{Type: "volume", Destination: "/builds", Source: "/var/lib/docker/volumes/v1/_data"}}
+	if got := resolveContainerProjectDirToHost("/builds/group/project", mounts); got != "" {
+		t.Fatalf("expected empty mapping for volume mount, got %q", got)
+	}
+}
+
+func TestShouldExtractFromContainer(t *testing.T) {
+	if !shouldExtractFromContainer("", "/builds/group/project") {
+		t.Fatalf("expected fallback extraction when sourceDir is empty and project dir exists")
+	}
+	if shouldExtractFromContainer("/host/builds/group/project", "/builds/group/project") {
+		t.Fatalf("did not expect fallback extraction when sourceDir is resolved")
+	}
+	if shouldExtractFromContainer("", "") {
+		t.Fatalf("did not expect fallback extraction when project dir is empty")
+	}
+}
+
+func TestExtractTarArchive(t *testing.T) {
+	tmp := t.TempDir()
+
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+
+	if err := tw.WriteHeader(&tar.Header{Name: "project", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+		t.Fatalf("write dir header: %v", err)
+	}
+	content := []byte("hello from archive")
+	if err := tw.WriteHeader(&tar.Header{Name: "project/README.md", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatalf("write file header: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("write file content: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	if err := extractTarArchive(bytes.NewReader(buf.Bytes()), tmp); err != nil {
+		t.Fatalf("extractTarArchive: %v", err)
+	}
+
+	outFile := filepath.Join(tmp, "project", "README.md")
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("read extracted file: %v", err)
+	}
+	if string(data) != string(content) {
+		t.Fatalf("unexpected extracted file content: %q", string(data))
+	}
+}
+
+func TestExtractTarArchiveRejectsUnsafePath(t *testing.T) {
+	tmp := t.TempDir()
+
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	content := []byte("escape")
+	if err := tw.WriteHeader(&tar.Header{Name: "../../etc/passwd", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content))}); err != nil {
+		t.Fatalf("write file header: %v", err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatalf("write file content: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+
+	if err := extractTarArchive(bytes.NewReader(buf.Bytes()), tmp); err == nil {
+		t.Fatalf("expected extractTarArchive to reject unsafe path")
+	}
+}
+
+func TestInferExtractedProjectRoot(t *testing.T) {
+	tmp := t.TempDir()
+	projectRoot := filepath.Join(tmp, "project")
+	if err := os.MkdirAll(projectRoot, 0o700); err != nil {
+		t.Fatalf("mkdir project root: %v", err)
+	}
+
+	if got := inferExtractedProjectRoot(tmp, "project"); got != projectRoot {
+		t.Fatalf("expected inferred project root %q, got %q", projectRoot, got)
+	}
+}
+
+func TestSafeTarPath(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		ok   bool
+		want string
+	}{
+		{name: "valid relative", in: "project/src/main.go", ok: true, want: filepath.Join("project", "src", "main.go")},
+		{name: "reject traversal", in: "../etc/passwd", ok: false},
+		{name: "reject absolute", in: "/etc/passwd", ok: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := safeTarPath(tc.in)
+			if ok != tc.ok {
+				t.Fatalf("safeTarPath(%q) ok=%v want %v", tc.in, ok, tc.ok)
+			}
+			if tc.ok && got != tc.want {
+				t.Fatalf("safeTarPath(%q)=%q want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveSourceDirWithFallback(t *testing.T) {
+	tests := []struct {
+		name                string
+		containerProjectDir string
+		mounts              []container.MountPoint
+		extractedPath       string
+		extractErr          error
+		wantPath            string
+		wantCalled          bool
+		wantExtracted       bool
+		wantErr             bool
+	}{
+		{
+			name:                "uses host mount when resolved",
+			containerProjectDir: "/builds/group/project",
+			mounts:              []container.MountPoint{{Destination: "/builds", Source: "/host/builds"}},
+			wantPath:            filepath.Join("/host/builds", "group", "project"),
+			wantCalled:          false,
+			wantExtracted:       false,
+			wantErr:             false,
+		},
+		{
+			name:                "falls back to extraction for named volume",
+			containerProjectDir: "/builds/group/project",
+			mounts:              []container.MountPoint{{Type: "volume", Destination: "/builds", Source: "/var/lib/docker/volumes/v1/_data"}},
+			extractedPath:       "/tmp/extracted/project",
+			wantPath:            "/tmp/extracted/project",
+			wantCalled:          true,
+			wantExtracted:       true,
+			wantErr:             false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			extractor := func(_ context.Context, _ string, _ string) (string, error) {
+				called = true
+				return tc.extractedPath, tc.extractErr
+			}
+
+			got, extracted, err := resolveSourceDirWithFallback(context.Background(), "cid", tc.containerProjectDir, tc.mounts, extractor)
+
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveSourceDirWithFallback err=%v wantErr=%v", err, tc.wantErr)
+			}
+			if got != tc.wantPath {
+				t.Fatalf("resolveSourceDirWithFallback path=%q want %q", got, tc.wantPath)
+			}
+			if called != tc.wantCalled {
+				t.Fatalf("extractor called=%v want %v", called, tc.wantCalled)
+			}
+			if extracted != tc.wantExtracted {
+				t.Fatalf("extracted=%v want %v", extracted, tc.wantExtracted)
+			}
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,6 +21,45 @@ func TestRules(t *testing.T) {
 		if r.ID == "" || r.Pattern == "" || r.StructuralID == "" {
 			t.Fatalf("rule has missing fields: %+v", r)
 		}
+	}
+}
+
+func TestRulesPatternMatching(t *testing.T) {
+	rules := Rules()
+	patterns := map[string]*regexp.Regexp{}
+	for _, rule := range rules {
+		re, err := regexp.Compile(rule.Pattern)
+		if err != nil {
+			t.Fatalf("failed to compile rule %s: %v", rule.ID, err)
+		}
+		patterns[rule.ID] = re
+	}
+
+	tests := []struct {
+		name  string
+		rule  string
+		token string
+		match bool
+	}{
+		{name: "PAT plain token", rule: customPATRuleID, token: "glpat-abcdefghijklmnopqrstuvwxyz", match: true},
+		{name: "PAT dotted token", rule: customPATRuleID, token: "glpat-abcdefghij.01.1706s7abu", match: true},
+		{name: "PAT too short", rule: customPATRuleID, token: "glpat-short", match: false},
+		{name: "RT plain token", rule: customRTRuleID, token: "glrt-abcdefghijklmnopqrstuvwxyz", match: true},
+		{name: "RT dotted token", rule: customRTRuleID, token: "glrt-abcdefghij.01.1706s7abu", match: true},
+		{name: "RT bad prefix", rule: customRTRuleID, token: "bad-abcdefghij.01.1706s7abu", match: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			re, ok := patterns[tc.rule]
+			if !ok {
+				t.Fatalf("missing pattern for rule %s", tc.rule)
+			}
+			got := re.MatchString(tc.token)
+			if got != tc.match {
+				t.Fatalf("rule %s token %q match=%v want %v", tc.rule, tc.token, got, tc.match)
+			}
+		})
 	}
 }
 
@@ -125,8 +165,10 @@ func TestValidateAgainstInstanceTokenSpecificEndpoints(t *testing.T) {
 		wantBodyPart string
 	}{
 		{name: "PAT", ruleID: customPATRuleID, token: "glpat-abcdefghijklmnopqrstuvwxyz", wantPath: gitLabUserAPIPath, wantMethod: http.MethodGet, wantHeader: "PRIVATE-TOKEN"},
+		{name: "PAT dotted", ruleID: customPATRuleID, token: "glpat-abcdefghij.01.1706s7abu", wantPath: gitLabUserAPIPath, wantMethod: http.MethodGet, wantHeader: "PRIVATE-TOKEN"},
 		{name: "CBT", ruleID: customCBTRuleID, token: "glcbt-abcdefghijklmnopqrstuvwxyz", wantPath: gitLabJobAPIPath, wantMethod: http.MethodGet, wantHeader: "JOB-TOKEN"},
 		{name: "RT", ruleID: customRTRuleID, token: "glrt-abcdefghijklmnopqrstuvwxyz", wantPath: gitLabRunnerVerifyAPIPath, wantMethod: http.MethodPost, wantBodyPart: "token=glrt-abcdefghijklmnopqrstuvwxyz"},
+		{name: "RT dotted", ruleID: customRTRuleID, token: "glrt-abcdefghij.01.1706s7abu", wantPath: gitLabRunnerVerifyAPIPath, wantMethod: http.MethodPost, wantBodyPart: "token=glrt-abcdefghij.01.1706s7abu"},
 	}
 
 	for _, tc := range tests {

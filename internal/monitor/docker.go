@@ -1,8 +1,10 @@
 package monitor
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/frjcomp/gl-runner-harvester/internal/detector"
+	"github.com/rs/zerolog/log"
 )
 
 type dockerContainerProvider interface {
@@ -44,6 +47,8 @@ func defaultDockerStrategy(osInfo detector.OSInfo) (*strategyWithCloser, error) 
 type sdkDockerProvider struct {
 	cli *client.Client
 }
+
+type containerProjectDirExtractor func(ctx context.Context, containerID, containerProjectDir string) (string, error)
 
 func newDockerProvider(osInfo detector.OSInfo) (*sdkDockerProvider, error) {
 	host, err := dockerHostForOS(osInfo.OS)
@@ -114,12 +119,17 @@ func (s *sdkDockerProvider) ListRunningContainers(ctx context.Context) ([]discov
 			jobID = c.ID
 		}
 
-		sourceDir := resolveContainerProjectDirToHost(ciLookup(env, "CI_PROJECT_DIR"), inspect.Mounts)
-		if sourceDir == "" {
-			sourceDir = dockerSourceDirFallback(inspect.Mounts)
+		containerProjectDir := ciLookup(env, "CI_PROJECT_DIR")
+		sourceDir, extracted, extractErr := resolveSourceDirWithFallback(ctx, c.ID, containerProjectDir, inspect.Mounts, s.extractContainerProjectDir)
+		if extractErr != nil {
+			log.Debug().Err(extractErr).Str("container_id", c.ID).Str("container_project_dir", containerProjectDir).Msg("Docker project dir extraction fallback failed")
+		} else if extracted {
+			log.Info().Str("container_id", c.ID).Str("source_dir", sourceDir).Msg("Docker project dir extraction fallback succeeded")
 		}
 		if sourceDir != "" {
 			env["CI_PROJECT_DIR"] = sourceDir
+		} else if strings.TrimSpace(containerProjectDir) != "" {
+			log.Warn().Str("container_id", c.ID).Str("container_project_dir", containerProjectDir).Msg("Unable to resolve CI_PROJECT_DIR to host path or extracted snapshot")
 		}
 
 		cmdline := ""
@@ -162,7 +172,7 @@ func resolveContainerProjectDirToHost(containerProjectDir string, mounts []conta
 	bestDest := ""
 	bestSource := ""
 	for _, m := range mounts {
-		if strings.TrimSpace(m.Source) == "" {
+		if !hostSourceUsableForCopy(m) {
 			continue
 		}
 		dest := path.Clean(strings.TrimSpace(m.Destination))
@@ -193,7 +203,7 @@ func resolveContainerProjectDirToHost(containerProjectDir string, mounts []conta
 
 func dockerSourceDirFallback(mounts []container.MountPoint) string {
 	for _, m := range mounts {
-		if m.Source == "" {
+		if !hostSourceUsableForCopy(m) {
 			continue
 		}
 		if strings.HasPrefix(m.Destination, "/builds") {
@@ -201,4 +211,158 @@ func dockerSourceDirFallback(mounts []container.MountPoint) string {
 		}
 	}
 	return ""
+}
+
+func hostSourceUsableForCopy(m container.MountPoint) bool {
+	source := strings.TrimSpace(m.Source)
+	if source == "" {
+		return false
+	}
+	// Prefer bind mounts for host-side copy. Non-bind mounts (for example named
+	// Docker volumes) should be harvested via container copy fallback.
+	mountType := strings.TrimSpace(strings.ToLower(string(m.Type)))
+	return mountType == "" || mountType == "bind"
+}
+
+func shouldExtractFromContainer(sourceDir, containerProjectDir string) bool {
+	return strings.TrimSpace(sourceDir) == "" && strings.TrimSpace(containerProjectDir) != ""
+}
+
+func resolveSourceDirWithFallback(ctx context.Context, containerID, containerProjectDir string, mounts []container.MountPoint, extract containerProjectDirExtractor) (string, bool, error) {
+	sourceDir := resolveContainerProjectDirToHost(containerProjectDir, mounts)
+	if sourceDir == "" {
+		sourceDir = dockerSourceDirFallback(mounts)
+	}
+	if !shouldExtractFromContainer(sourceDir, containerProjectDir) {
+		return sourceDir, false, nil
+	}
+	if extract == nil {
+		return sourceDir, true, fmt.Errorf("extractor is nil")
+	}
+
+	extractedDir, err := extract(ctx, containerID, containerProjectDir)
+	if err != nil {
+		return sourceDir, true, err
+	}
+
+	return extractedDir, true, nil
+}
+
+func (s *sdkDockerProvider) extractContainerProjectDir(ctx context.Context, containerID, containerProjectDir string) (string, error) {
+	projectDir := strings.TrimSpace(containerProjectDir)
+	if projectDir == "" {
+		return "", fmt.Errorf("container project directory is empty")
+	}
+
+	r, _, err := s.cli.CopyFromContainer(ctx, containerID, projectDir)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+
+	extractRoot, err := os.MkdirTemp("", "gl-runner-harvester-src-")
+	if err != nil {
+		return "", err
+	}
+
+	if err := extractTarArchive(r, extractRoot); err != nil {
+		_ = os.RemoveAll(extractRoot)
+		return "", err
+	}
+
+	resolved := inferExtractedProjectRoot(extractRoot, path.Base(path.Clean(projectDir)))
+	if resolved == "" {
+		_ = os.RemoveAll(extractRoot)
+		return "", fmt.Errorf("extracted archive for %q was empty", projectDir)
+	}
+
+	return resolved, nil
+}
+
+func extractTarArchive(src io.Reader, destDir string) error {
+	tr := tar.NewReader(src)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		cleanName, ok := safeTarPath(header.Name)
+		if !ok {
+			return fmt.Errorf("unsafe archive entry path %q", header.Name)
+		}
+		if cleanName == "." {
+			continue
+		}
+
+		targetPath := filepath.Join(destDir, cleanName)
+		rel, err := filepath.Rel(destDir, targetPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("archive entry escapes destination: %q", header.Name)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0o700); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o700); err != nil {
+				return err
+			}
+			f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				_ = f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return err
+			}
+		default:
+			continue
+		}
+	}
+}
+
+func safeTarPath(name string) (string, bool) {
+	clean := filepath.Clean(filepath.FromSlash(strings.TrimSpace(name)))
+	if clean == "" {
+		return "", false
+	}
+	if filepath.IsAbs(clean) {
+		return "", false
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return clean, true
+}
+
+func inferExtractedProjectRoot(extractRoot, projectBase string) string {
+	if strings.TrimSpace(extractRoot) == "" {
+		return ""
+	}
+
+	entries, err := os.ReadDir(extractRoot)
+	if err != nil {
+		return ""
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+
+	if len(entries) == 1 {
+		entry := entries[0]
+		if entry.IsDir() && (projectBase == "" || entry.Name() == projectBase) {
+			return filepath.Join(extractRoot, entry.Name())
+		}
+	}
+
+	return extractRoot
 }

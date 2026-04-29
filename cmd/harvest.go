@@ -13,7 +13,6 @@ import (
 )
 
 var (
-	outputDir      string
 	collectionPath string
 	runnerConfig   string
 	executor       string
@@ -33,7 +32,6 @@ copies source code when enabled, and optionally scans for secrets.`,
 
 func init() {
 	harvestCmd.Flags().StringVar(&collectionPath, "collection-path", "/tmp/gl-harvest", "Directory to store harvested data")
-	harvestCmd.Flags().StringVar(&outputDir, "output-dir", "", "Deprecated alias for --collection-path")
 	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
 	harvestCmd.Flags().StringVar(&executor, "executor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
 	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
@@ -89,9 +87,6 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 	}
 
 	collectPath := strings.TrimSpace(collectionPath)
-	if legacy := strings.TrimSpace(outputDir); legacy != "" {
-		collectPath = legacy
-	}
 
 	// 5. Create harvester
 	h := harvester.New(collectPath, scanSecrets, normalizedGitLabURL, !noHarvestFiles)

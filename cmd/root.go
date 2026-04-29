@@ -41,7 +41,8 @@ func configureLogging(level string) error {
 	writer := zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}
 	log.Logger = zerolog.New(writer).With().Timestamp().Logger()
 
-	switch strings.ToLower(level) {
+	normalizedLevel := strings.ToLower(level)
+	switch normalizedLevel {
 	case "trace":
 		zerolog.SetGlobalLevel(zerolog.TraceLevel)
 	case "debug":
@@ -54,7 +55,10 @@ func configureLogging(level string) error {
 		zerolog.SetGlobalLevel(zerolog.ErrorLevel)
 	default:
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+		normalizedLevel = "info"
 	}
+
+	log.Info().Str("log_level", normalizedLevel).Msg("Log level configured")
 	return nil
 }
 

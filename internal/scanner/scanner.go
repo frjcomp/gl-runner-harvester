@@ -104,7 +104,12 @@ func Scan(envVars map[string]string, scanDir, gitlabURL string) ([]Finding, erro
 		})
 	}
 
-	return findings, nil
+	deduped := dedupeFindings(findings)
+	for _, finding := range deduped {
+		logFinding(finding)
+	}
+
+	return deduped, nil
 }
 
 func scanSource(content, source string, locationFn func(line int) string, validationEngine validationEngine) ([]Finding, error) {
@@ -129,10 +134,37 @@ func scanSource(content, source string, locationFn func(line int) string, valida
 			applyVerification(&finding, match, validationEngine)
 		}
 		findings = append(findings, finding)
-		logFinding(finding)
 	}
 
 	return findings, nil
+}
+
+func dedupeFindings(findings []Finding) []Finding {
+	if len(findings) <= 1 {
+		return findings
+	}
+
+	indices := make(map[string]int, len(findings))
+	unique := make([]Finding, 0, len(findings))
+
+	for _, finding := range findings {
+		idx, seen := indices[finding.Match]
+		if !seen {
+			indices[finding.Match] = len(unique)
+			unique = append(unique, finding)
+			continue
+		}
+
+		if !hasVerification(unique[idx]) && hasVerification(finding) {
+			unique[idx] = finding
+		}
+	}
+
+	return unique
+}
+
+func hasVerification(f Finding) bool {
+	return f.VerificationStatus != "" || f.VerificationMsg != ""
 }
 
 func buildFinding(ruleName, location, secret string) Finding {

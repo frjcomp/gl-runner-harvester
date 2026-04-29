@@ -41,7 +41,7 @@ func Rules() []*types.Rule {
 		{
 			ID:          customPATRuleID,
 			Name:        "Custom GitLab Personal Access Token",
-			Pattern:     `(?P<secret>glpat-[A-Za-z0-9_-]{20,})`,
+			Pattern:     `(?P<secret>glpat-[A-Za-z0-9._-]{20,})`,
 			Description: "Detects GitLab Personal Access Tokens in glpat- format",
 			Categories:  []string{"token", "gitlab", "custom"},
 			Keywords:    []string{"glpat-"},
@@ -59,7 +59,7 @@ func Rules() []*types.Rule {
 		{
 			ID:          customRTRuleID,
 			Name:        "Custom GitLab Runner Token",
-			Pattern:     `(?P<secret>glrt-[A-Za-z0-9_-]{20,})`,
+			Pattern:     `(?P<secret>glrt-[A-Za-z0-9._-]{20,})`,
 			Description: "Detects GitLab runner tokens in glrt- format",
 			Categories:  []string{"token", "gitlab", "custom", "runner"},
 			Keywords:    []string{"glrt-"},

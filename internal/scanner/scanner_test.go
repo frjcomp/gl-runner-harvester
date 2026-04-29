@@ -94,3 +94,93 @@ func TestScanWhenCoreNotInitialized(t *testing.T) {
 		t.Fatalf("expected initialization error")
 	}
 }
+
+func TestHasVerification(t *testing.T) {
+	tests := []struct {
+		name    string
+		finding Finding
+		want    bool
+	}{
+		{name: "no verification", finding: Finding{Match: "a"}, want: false},
+		{name: "status only", finding: Finding{Match: "a", VerificationStatus: "valid"}, want: true},
+		{name: "message only", finding: Finding{Match: "a", VerificationMsg: "ok"}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hasVerification(tc.finding)
+			if got != tc.want {
+				t.Fatalf("hasVerification() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDedupeFindings(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []Finding
+		want     []Finding
+		wantSize int
+	}{
+		{
+			name: "keeps unique matches",
+			input: []Finding{
+				{Type: "a", Location: "env:A", Match: "secret-1"},
+				{Type: "b", Location: "env:B", Match: "secret-2"},
+			},
+			want: []Finding{
+				{Type: "a", Location: "env:A", Match: "secret-1"},
+				{Type: "b", Location: "env:B", Match: "secret-2"},
+			},
+			wantSize: 2,
+		},
+		{
+			name: "dedupes unverified duplicates by first seen",
+			input: []Finding{
+				{Type: "first", Location: "env:A", Match: "secret-1"},
+				{Type: "second", Location: "env:B", Match: "secret-1"},
+			},
+			want: []Finding{
+				{Type: "first", Location: "env:A", Match: "secret-1"},
+			},
+			wantSize: 1,
+		},
+		{
+			name: "prefers verified duplicate",
+			input: []Finding{
+				{Type: "plain", Location: "env:URL", Match: "secret-1"},
+				{Type: "verified", Location: "env:TOKEN", Match: "secret-1", VerificationStatus: "valid", VerificationMsg: "accepted"},
+			},
+			want: []Finding{
+				{Type: "verified", Location: "env:TOKEN", Match: "secret-1", VerificationStatus: "valid", VerificationMsg: "accepted"},
+			},
+			wantSize: 1,
+		},
+		{
+			name: "keeps first verified when duplicate is also verified",
+			input: []Finding{
+				{Type: "first", Location: "env:A", Match: "secret-1", VerificationStatus: "invalid", VerificationMsg: "rejected"},
+				{Type: "second", Location: "env:B", Match: "secret-1", VerificationStatus: "valid", VerificationMsg: "accepted"},
+			},
+			want: []Finding{
+				{Type: "first", Location: "env:A", Match: "secret-1", VerificationStatus: "invalid", VerificationMsg: "rejected"},
+			},
+			wantSize: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := dedupeFindings(tc.input)
+			if len(got) != tc.wantSize {
+				t.Fatalf("dedupeFindings() length = %d, want %d", len(got), tc.wantSize)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("dedupeFindings()[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
