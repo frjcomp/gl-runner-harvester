@@ -16,7 +16,7 @@ var (
 	outputDir      string
 	collectionPath string
 	runnerConfig   string
-	exectuor       string
+	executor       string
 	interval       int
 	scanSecrets    bool
 	gitlabURL      string
@@ -35,7 +35,7 @@ func init() {
 	harvestCmd.Flags().StringVar(&collectionPath, "collection-path", "/tmp/gl-harvest", "Directory to store harvested data")
 	harvestCmd.Flags().StringVar(&outputDir, "output-dir", "", "Deprecated alias for --collection-path")
 	harvestCmd.Flags().StringVar(&runnerConfig, "runner-config", "", "Path to GitLab runner config.toml (auto-detected if not specified)")
-	harvestCmd.Flags().StringVar(&exectuor, "exectuor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
+	harvestCmd.Flags().StringVar(&executor, "executor", "", "Manually set executor type (shell, ssh, docker, kubernetes)")
 	harvestCmd.Flags().IntVar(&interval, "interval", 5, "Polling interval in seconds")
 	harvestCmd.Flags().BoolVar(&scanSecrets, "scan", true, "Enable secret scanning on harvested data")
 	harvestCmd.Flags().BoolVar(&noHarvestFiles, "no-harvest-files", false, "Do not copy or write harvested files; scan source/env in place and only emit logs")
@@ -53,8 +53,8 @@ func runHarvest(cmd *cobra.Command, args []string) error {
 
 	// 2. Detect executor type
 	execType, execMeta := detector.DetectExecutor(runnerConfig)
-	if exectuor != "" {
-		manualExecType, err := parseManualExecutor(exectuor)
+	if executor != "" {
+		manualExecType, err := parseManualExecutor(executor)
 		if err != nil {
 			return err
 		}
@@ -168,6 +168,6 @@ func parseManualExecutor(v string) (detector.ExecutorType, error) {
 	case string(detector.Kubernetes):
 		return detector.Kubernetes, nil
 	default:
-		return detector.Unknown, fmt.Errorf("invalid --exectuor value %q (supported: shell, ssh, docker, kubernetes)", v)
+		return detector.Unknown, fmt.Errorf("invalid --executor value %q (supported: shell, ssh, docker, kubernetes)", v)
 	}
 }

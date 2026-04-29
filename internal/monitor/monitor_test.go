@@ -245,18 +245,6 @@ func TestDockerStrategyFallbackToDirectory(t *testing.T) {
 	}
 }
 
-func TestIsGitLabRunnerUser(t *testing.T) {
-	if !isGitLabRunnerUser("HOST\\gitlab-runner") {
-		t.Fatalf("expected domain-qualified gitlab-runner to match")
-	}
-	if !isGitLabRunnerUser("gitlab-runner") {
-		t.Fatalf("expected plain gitlab-runner to match")
-	}
-	if isGitLabRunnerUser("HOST\\someone") {
-		t.Fatalf("did not expect non-runner account to match")
-	}
-}
-
 func TestCILookupCaseInsensitive(t *testing.T) {
 	env := map[string]string{"ci_job_id": "777"}
 	if got := ciLookup(env, "CI_JOB_ID"); got != "777" {

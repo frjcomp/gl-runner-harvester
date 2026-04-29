@@ -65,15 +65,15 @@ func TestParseManualExecutor(t *testing.T) {
 }
 
 func TestRunHarvestInvalidManualExecutor(t *testing.T) {
-	oldExec := exectuor
-	defer func() { exectuor = oldExec }()
+	oldExec := executor
+	defer func() { executor = oldExec }()
 
-	exectuor = "invalid"
+	executor = "invalid"
 	err := runHarvest(nil, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "invalid --exectuor") {
+	if !strings.Contains(err.Error(), "invalid --executor") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
